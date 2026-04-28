@@ -392,30 +392,58 @@ llm_profiles:
 
 ## 六、定时任务配置
 
-### 6.1 cron 任务列表
+### 6.1 必须运行的服务（3个 cron 任务）
+
+项目有 3 个必须持续运行的服务，保证 24/7 监控：
 
 ```cron
-# 每分钟检查并确保 WebSocket 采集进程运行
-*/1 * * * * python3 /Users/shinji/project-x/volume-ratio/scripts/collect_ws_launcher.py
+# === 跨市场量比监控 (WebSocket 推送模式) ===
+# 守护进程启动器：每分钟检查 WebSocket 进程是否存活，断开则重启
+*/1 * * * 1-5 /usr/bin/python3 /Users/shinji/project-x/volume-ratio/scripts/collect_ws_launcher.py >> /Users/shinji/project-x/volume-ratio/logs/launcher.log 2>&1
 
-# 每分钟扫描信号（alert.py）
-*/1 * * * * cd /Users/shinji/project-x/volume-ratio && python3 scripts/alert.py >> logs/alert.log 2>&1
+# 信号扫描 + LLM 解读 (每1分钟)
+*/1 * * * 1-5 /Users/shinji/project-x/volume-ratio/.venv/bin/python /Users/shinji/project-x/volume-ratio/scripts/alert.py >> /Users/shinji/project-x/volume-ratio/logs/alert.log 2>&1
 
-# 每30分钟发送简报（可选）
-*/30 * * * * cd /Users/shinji/project-x/volume-ratio && python3 scripts/alert.py --brief >> logs/brief.log 2>&1
+# 30分钟量比简报
+*/30 * * * 1-5 /Users/shinji/project-x/volume-ratio/.venv/bin/python /Users/shinji/project-x/volume-ratio/scripts/alert.py --brief >> /Users/shinji/project-x/volume-ratio/logs/brief.log 2>&1
 ```
 
-### 6.2 进程管理
+| 服务 | 频率 | 作用 |
+|:--|:--|:--|
+| `collect_ws_launcher.py` | 每分钟 | 检查并确保 WebSocket 采集进程存活 |
+| `alert.py` | 每分钟 | 扫描量比信号，触发时推送飞书 |
+| `alert.py --brief` | 每30分钟 | 发送持仓组合量比简报 |
+
+### 6.2 临时停止与恢复
 
 ```bash
-# 查看 WebSocket 采集进程
-cat logs/ws_collect.pid
+# 查看当前 cron 配置
+crontab -l
 
-# 查看运行状态
+# 临时停止（注释掉这3行即可，恢复时取消注释）
+# */1 * * * 1-5 /usr/bin/python3 /Users/shinji/project-x/volume-ratio/scripts/collect_ws_launcher.py ...
+# */1 * * * 1-5 /Users/shinji/project-x/volume-ratio/.venv/bin/python /Users/shinji/project-x/volume-ratio/scripts/alert.py ...
+# */30 * * * 1-5 /Users/shinji/project-x/volume-ratio/.venv/bin/python /Users/shinji/project-x/volume-ratio/scripts/alert.py --brief ...
+
+# 编辑 cron
+crontab -e
+
+# 恢复运行：取消注释上述3行，保存退出
+```
+
+### 6.3 进程管理
+
+```bash
+# 查看 WebSocket 采集进程是否在运行
+cat /Users/shinji/project-x/volume-ratio/logs/ws_collect.pid
 ps aux | grep collect_ws
 
-# 手动重启
-python3 scripts/collect_ws_launcher.py
+# 手动重启 WebSocket 采集
+python3 /Users/shinji/project-x/volume-ratio/scripts/collect_ws_launcher.py
+
+# 查看日志
+tail -f /Users/shinji/project-x/volume-ratio/logs/ws_collect.log
+tail -f /Users/shinji/project-x/volume-ratio/logs/alert.log
 ```
 
 ---
