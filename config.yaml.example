@@ -1,0 +1,65 @@
+# ============================================================
+# 跨市场量比监控系统 - 配置示例文件
+# ============================================================
+# 复制此文件为 config.yaml 并填入实际值
+# 敏感信息（api_key、webhook_url）不要提交到代码仓库
+# ============================================================
+
+# ------------------------------------------------------------
+# 一、监控标的（必填）
+# ------------------------------------------------------------
+watchlist:
+  us:
+    - NVDL.US
+    - MUU.US
+    - CLF.US
+    - BMNR.US
+    - DRAM.US
+    - NVO.US
+  hk:
+    - 1810.HK
+    - 700.HK
+    - 9988.HK
+  cn:
+    - 601899.SH
+    - 603308.SH
+
+# ------------------------------------------------------------
+# 二、系统参数
+# ------------------------------------------------------------
+params:
+  volume_ratio_window: 5
+  snapshot_interval: 60
+  alert_threshold: 2.0
+  shrink_threshold: 0.6
+
+# ------------------------------------------------------------
+# 三、LLM 配置
+# ------------------------------------------------------------
+# 使用命令切换模型：python3 scripts/llm.py --switch minimax
+llm:
+  provider: "minimax"
+  model: "MiniMax-M2.7"
+  base_url: "https://api.minimaxi.com/anthropic"
+  api_key: "YOUR_API_KEY_HERE"
+  max_tokens: 200
+  temperature: 0.3
+
+llm_profiles:
+  minimax:
+    provider: "minimax"
+    model: "MiniMax-M2.7"
+    base_url: "https://api.minimaxi.com/anthropic"
+    api_key: "YOUR_MINIMAX_API_KEY"
+
+  xiaomi:
+    provider: "xiaomi"
+    model: "mimo-v2.5-pro"
+    base_url: "https://token-plan-cn.xiaomimimo.com/anthropic"
+    api_key: "YOUR_XIAOMI_API_KEY"
+
+# ------------------------------------------------------------
+# 四、飞书推送配置
+# ------------------------------------------------------------
+feishu:
+  webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/YOUR_WEBHOOK_TOKEN"

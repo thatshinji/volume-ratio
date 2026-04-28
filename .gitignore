@@ -1,0 +1,20 @@
+# 敏感信息
+config.yaml           # 本地配置（含 API keys），不提交
+*.log                  # 日志文件
+logs/*.pid             # 进程 ID
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Data
+data/ratios.db
+data/snapshots/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
