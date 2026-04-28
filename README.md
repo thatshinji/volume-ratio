@@ -431,7 +431,29 @@ crontab -e
 # 恢复运行：取消注释上述3行，保存退出
 ```
 
-### 6.3 进程管理
+### 6.3 一键启停脚本
+
+项目提供了一键启动和关停脚本，方便管理服务状态：
+
+```bash
+# 一键启动所有服务
+python3 /Users/shinji/project-x/volume-ratio/scripts/start_all.py
+
+# 一键关停所有服务
+python3 /Users/shinji/project-x/volume-ratio/scripts/stop_all.py
+```
+
+**start_all.py** 执行以下操作：
+1. 添加 3 个 cron 任务（如果不存在）
+2. 启动 WebSocket 采集进程
+3. 验证 cron 配置
+
+**stop_all.py** 执行以下操作：
+1. 杀掉所有 collect_ws.py 进程
+2. 移除 3 个 cron 任务
+3. 清理 PID 文件
+
+### 6.4 进程管理
 
 ```bash
 # 查看 WebSocket 采集进程是否在运行
