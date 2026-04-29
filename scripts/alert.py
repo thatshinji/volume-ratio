@@ -360,6 +360,10 @@ def should_push(ticker: str, new_state: str) -> bool:
     if new_priority > old_priority:
         return True
 
+    # 状态降级：只推送"恢复正常"（信号解除），其他降级静默
+    if new_state == "正常" and old_state is not None:
+        return True
+
     return False
 
 
