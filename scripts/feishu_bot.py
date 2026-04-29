@@ -187,15 +187,18 @@ def build_scan_card() -> dict:
         if not tickers:
             continue
         lines.append(f"**{label}**")
+        lines.append("| 标的 | 价格 | 涨跌 | 量比 | 状态 |")
+        lines.append("| --- | ---: | ---: | ---: | --- |")
         for r in tickers:
             name = r.get("name", r["ticker"])
             ticker = r["ticker"]
             ratio = r.get("ratio", 0)
             change = r.get("change_pct", 0)
+            price = r.get("price", 0)
             direction = "↑" if change > 0 else "↓"
             ratio_display = format_ratio_display(ratio)
             emoji = "🔥" if ratio > 2.0 else ("⚠️" if ratio < 0.8 else "✅")
-            lines.append(f"**{ticker}** {name}　{direction}{abs(change):.1f}%　{ratio:.1f} {ratio_display} {emoji}")
+            lines.append(f"| {ticker}-{name} | ${price} | {direction}{abs(change):.1f}% | {ratio:.1f} | {emoji} {ratio_display} |")
         lines.append("")
 
     return {
@@ -230,13 +233,15 @@ def build_signals_card() -> dict:
             content = "今日无触发信号"
         else:
             lines = [f"**{today}** 共 {len(rows)} 个信号", ""]
+            lines.append("| 时间 | 标的 | 涨跌 | 量比 | 信号 | 来源 |")
+            lines.append("| ---: | --- | ---: | ---: | --- | --- |")
             for ticker, name, sig_type, ratio, price, change, source, ts in rows:
                 name = name or ticker
                 direction = "↑" if change > 0 else "↓"
                 dt = datetime.fromisoformat(ts).strftime("%H:%M")
                 ratio_display = format_ratio_display(ratio or 0)
                 src = "日内" if source == "intraday" else "5日"
-                lines.append(f"**[{dt}]** **{ticker}** {name}　{direction}{abs(change):.1f}%　{ratio_display}　{sig_type}　[{src}]")
+                lines.append(f"| {dt} | {ticker}-{name} | {direction}{abs(change):.1f}% | {ratio_display} | {sig_type} | {src} |")
             content = "\n".join(lines)
 
     return {
