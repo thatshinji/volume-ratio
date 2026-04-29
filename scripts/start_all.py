@@ -121,7 +121,8 @@ def main():
     print("=== 一键启动跨市场量比监控服务 ===")
     print()
 
-    launcher_script = SCRIPTS_DIR / "collect_ws_launcher.py"
+    ws_launcher_script = SCRIPTS_DIR / "collect_ws_launcher.py"
+    bot_launcher_script = SCRIPTS_DIR / "feishu_bot_launcher.py"
     alert_script = SCRIPTS_DIR / "alert.py"
     cleanup_script = SCRIPTS_DIR / "cleanup.py"
     python_bin = str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
@@ -129,7 +130,8 @@ def main():
 
     # 1. 添加 cron 任务
     print("[1/4] 配置 cron 任务...")
-    add_cron(f"*/1 * * * 1-5 {launcher_python} {launcher_script} >> {LOG_DIR}/launcher.log 2>&1")
+    add_cron(f"*/1 * * * 1-5 {launcher_python} {ws_launcher_script} >> {LOG_DIR}/launcher.log 2>&1")
+    add_cron(f"*/1 * * * {python_bin} {bot_launcher_script} >> {LOG_DIR}/launcher.log 2>&1")
     add_cron(f"*/1 * * * 1-5 {python_bin} {alert_script} >> {LOG_DIR}/alert.log 2>&1")
     add_cron(f"*/30 * * * 1-5 {python_bin} {alert_script} --brief >> {LOG_DIR}/brief.log 2>&1")
     add_cron(f"0 * * * * {python_bin} {cleanup_script} >> {LOG_DIR}/cleanup.log 2>&1")

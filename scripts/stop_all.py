@@ -75,6 +75,7 @@ def main():
     # 2. 移除 cron 任务
     print("[2/3] 移除 cron 任务...")
     remove_cron("collect_ws_launcher.py")
+    remove_cron("feishu_bot_launcher.py")
     remove_cron("volume-ratio/scripts/alert.py")
     remove_cron("volume-ratio/scripts/cleanup.py")
     print()
