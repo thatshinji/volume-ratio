@@ -186,10 +186,16 @@ def build_scan_card() -> dict:
     for label, tickers in [("🇺🇸 美股", us), ("🇭🇰 港股", hk), ("🇨🇳 A股", cn)]:
         if not tickers:
             continue
-        lines.append(f"**{label}:**")
+        lines.append(f"**{label}**")
         for r in tickers:
             name = r.get("name", r["ticker"])
-            lines.append(format_ticker_line(r["ticker"], name, r.get("change_pct", 0), r.get("ratio", 0)))
+            ticker = r["ticker"]
+            ratio = r.get("ratio", 0)
+            change = r.get("change_pct", 0)
+            direction = "↑" if change > 0 else "↓"
+            ratio_display = format_ratio_display(ratio)
+            emoji = "🔥" if ratio > 2.0 else ("⚠️" if ratio < 0.8 else "✅")
+            lines.append(f"**{ticker}** {name}　{direction}{abs(change):.1f}%　{ratio:.1f} {ratio_display} {emoji}")
         lines.append("")
 
     return {
@@ -230,7 +236,7 @@ def build_signals_card() -> dict:
                 dt = datetime.fromisoformat(ts).strftime("%H:%M")
                 ratio_display = format_ratio_display(ratio or 0)
                 src = "日内" if source == "intraday" else "5日"
-                lines.append(f"[{dt}] {ticker} {name} {direction}{abs(change):.1f}% {ratio_display} ({sig_type}) [{src}]")
+                lines.append(f"**[{dt}]** **{ticker}** {name}　{direction}{abs(change):.1f}%　{ratio_display}　{sig_type}　[{src}]")
             content = "\n".join(lines)
 
     return {
