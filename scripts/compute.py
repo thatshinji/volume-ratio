@@ -21,7 +21,7 @@ DB_PATH = ROOT / "data" / "ratios.db"
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from core.config import load_config
-from core.market import get_market, get_all_tickers
+from core.market import get_market, get_all_tickers, get_ticker_name
 
 
 def parse_timestamp(ts: str) -> Optional[datetime]:
@@ -34,51 +34,46 @@ def parse_timestamp(ts: str) -> Optional[datetime]:
         return None
 
 
-def get_market_dir(ticker: str) -> Path:
+def get_jsonl_path(ticker: str, day: datetime = None) -> Path:
+    """获取 JSONL 文件路径"""
+    if day is None:
+        day = datetime.now()
     market = get_market(ticker)
-    return SNAPSHOT_DIR / market
-
-
-def get_ticker_prefix(ticker: str) -> str:
-    return ticker.replace('.', '_')
-
-
-def list_snapshots(ticker: str, day: datetime) -> List[Path]:
-    """列出指定日期的所有快照文件，按时间排序"""
-    market_dir = get_market_dir(ticker)
-    if not market_dir.exists():
-        return []
-
+    market_dir = SNAPSHOT_DIR / market
     day_str = day.strftime("%Y%m%d")
-    prefix = get_ticker_prefix(ticker)
-    snapshots = []
-
-    for f in market_dir.iterdir():
-        if not f.name.startswith(prefix):
-            continue
-        if day_str not in f.name:
-            continue
-        snapshots.append(f)
-
-    snapshots.sort()
-    return snapshots
+    filename = f"{ticker.replace('.', '_')}_{day_str}.jsonl"
+    return market_dir / filename
 
 
-def get_latest_snapshot_info(ticker: str, day: datetime = None) -> Optional[dict]:
-    """获取指定日期最新的快照数据（解析后的 dict）"""
+def read_snapshots(ticker: str, day: datetime = None) -> List[dict]:
+    """从 JSONL 文件读取指定日期的所有快照数据"""
     if day is None:
         day = datetime.now()
 
-    snapshots = list_snapshots(ticker, day)
-    if not snapshots:
-        return None
+    jsonl_path = get_jsonl_path(ticker, day)
+    if not jsonl_path.exists():
+        return []
 
-    latest_file = snapshots[-1]
+    records = []
     try:
-        with open(latest_file, "r", encoding="utf-8") as fp:
-            return json.load(fp)
-    except (json.JSONDecodeError, OSError):
-        return None
+        with open(jsonl_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        return []
+    return records
+
+
+def get_latest_snapshot_info(ticker: str, day: datetime = None) -> Optional[dict]:
+    """获取指定日期最新的快照数据"""
+    records = read_snapshots(ticker, day)
+    return records[-1] if records else None
 
 
 def get_snapshot_n_minutes_ago(ticker: str, day: datetime, n: int = 5) -> Optional[dict]:
@@ -86,26 +81,20 @@ def get_snapshot_n_minutes_ago(ticker: str, day: datetime, n: int = 5) -> Option
     获取指定日期 n 分钟前的快照
     用于计算 interval volume = latest - n_minutes_ago
     """
-    snapshots = list_snapshots(ticker, day)
-    if not snapshots:
+    records = read_snapshots(ticker, day)
+    if not records:
         return None
 
     target_time = day - timedelta(minutes=n)
-    # 找到最接近但不超过 target_time 的快照
     best = None
-    for f in snapshots:
-        try:
-            with open(f, "r", encoding="utf-8") as fp:
-                data = json.load(fp)
-                ts = parse_timestamp(data.get("timestamp", ""))
-                if ts and ts <= target_time:
-                    best = (ts, data)
-                elif ts and ts > target_time:
-                    break
-        except (json.JSONDecodeError, OSError):
-            continue
+    for data in records:
+        ts = parse_timestamp(data.get("timestamp", ""))
+        if ts and ts <= target_time:
+            best = data
+        elif ts and ts > target_time:
+            break
 
-    return best[1] if best else None
+    return best
 
 
 def get_interval_volume(ticker: str, day: datetime, window_minutes: int = 5) -> float:
@@ -177,6 +166,21 @@ def init_db():
                 UNIQUE(ticker, timestamp)
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker TEXT NOT NULL,
+                name TEXT,
+                timestamp TEXT NOT NULL,
+                signal_type TEXT NOT NULL,
+                ratio REAL,
+                price REAL,
+                change_pct REAL,
+                source TEXT,
+                llm_analysis TEXT,
+                notified INTEGER DEFAULT 1
+            )
+        """)
     _db_initialized = True
 
 
@@ -242,33 +246,28 @@ def calc_intraday_ratio(ticker: str, current_time: datetime = None) -> tuple:
     if current_time is None:
         current_time = datetime.now()
 
-    snapshots = list_snapshots(ticker, current_time)
-    if len(snapshots) < MIN_RECORDS:
+    raw_snapshots = read_snapshots(ticker, current_time)
+    if len(raw_snapshots) < MIN_RECORDS:
         return 0.0, "数据不足", False, False, False
 
-    # 读取所有快照，构建 real_vol 序列
+    # 构建 real_vol 序列（差分量）
     records = []
     prev_vol = None
-    for f in snapshots:
-        try:
-            with open(f, "r", encoding="utf-8") as fp:
-                data = json.load(fp)
-            vol = float(data.get("volume", 0) or 0)
-            price = float(data.get("price", 0) or 0)
-            low = float(data.get("low", 0) or 0)
-            ts = parse_timestamp(data.get("timestamp", ""))
+    for data in raw_snapshots:
+        vol = float(data.get("volume", 0) or 0)
+        price = float(data.get("price", 0) or 0)
+        low = float(data.get("low", 0) or 0)
+        ts = parse_timestamp(data.get("timestamp", ""))
 
-            if prev_vol is not None:
-                real_vol = max(0, vol - prev_vol)
-                records.append({
-                    "ts": ts,
-                    "price": price,
-                    "real_vol": real_vol,
-                    "low": low,
-                })
-            prev_vol = vol
-        except (json.JSONDecodeError, OSError):
-            continue
+        if prev_vol is not None:
+            real_vol = max(0, vol - prev_vol)
+            records.append({
+                "ts": ts,
+                "price": price,
+                "real_vol": real_vol,
+                "low": low,
+            })
+        prev_vol = vol
 
     if len(records) < MIN_RECORDS:
         return 0.0, "数据不足", False, False, False
@@ -346,6 +345,25 @@ def save_ratio(ticker: str, ratio: float, volume_today: float, volume_avg5: floa
         pass
 
 
+def save_signal(ticker: str, name: str, signal_type: str, ratio: float,
+                price: float, change_pct: float, source: str = "",
+                llm_analysis: str = "", notified: int = 1):
+    """保存信号记录到 signals 表"""
+    init_db()
+    db_path = get_db_path()
+    now = datetime.now().isoformat()
+
+    try:
+        with sqlite3.connect(db_path, timeout=30) as conn:
+            conn.execute("""
+                INSERT INTO signals
+                (ticker, name, timestamp, signal_type, ratio, price, change_pct, source, llm_analysis, notified)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (ticker, name, now, signal_type, ratio, price, change_pct, source, llm_analysis, notified))
+    except sqlite3.Error:
+        pass
+
+
 def get_latest_snapshot(ticker: str) -> Optional[dict]:
     """获取最新行情快照"""
     return get_latest_snapshot_info(ticker, datetime.now())
@@ -374,8 +392,12 @@ def compute_ticker(ticker: str) -> Optional[dict]:
     price = snapshot.get("price", 0) if snapshot else 0
     change_pct = snapshot.get("change_pct", 0) if snapshot else 0
 
+    config = load_config()
+    name = get_ticker_name(config, ticker)
+
     result = {
         "ticker": ticker,
+        "name": name,
         "ratio": round(ratio, 2),
         "ratio_intraday": intraday_ratio,
         "volume_today": today_vol,

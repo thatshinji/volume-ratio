@@ -5,6 +5,7 @@ cron 每1分钟扫描，触发信号时通过 webhook 推送到飞书
 """
 
 import json
+import sqlite3
 import sys
 import time
 from datetime import datetime
@@ -19,6 +20,8 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from core.config import load_config
+from core.market import get_ticker_name
+from core.display import format_ratio_display, format_ticker_line
 
 
 # === 信号规则 ===
@@ -132,6 +135,7 @@ def detect_signals(results: List[dict]) -> List[dict]:
 def format_alert_message(alert: dict, analysis: Optional[str] = None) -> str:
     """格式化飞书消息（可选 LLM 分析）"""
     ticker = alert["ticker"]
+    name = alert.get("name", ticker)
     ratio = alert["ratio"]
     change = alert["change_pct"]
     price = alert["price"]
@@ -140,12 +144,13 @@ def format_alert_message(alert: dict, analysis: Optional[str] = None) -> str:
 
     emoji = "🔥" if ratio > 2.0 else "⚠️"
     direction = "↑" if change > 0 else "↓"
+    ratio_display = format_ratio_display(ratio)
 
     type_label = "【日内】" if source == "intraday" else "【5日】"
 
-    msg = f"""{emoji} {type_label}{ticker}
+    msg = f"""{emoji} {type_label}{ticker} {name}
 当前价: {price} ({direction}{abs(change):.2f}%)
-量比: {ratio} ({signals})
+量比: {ratio} {ratio_display} ({signals})
 时间: {datetime.now().strftime('%H:%M:%S')}
 """
     if analysis:
@@ -206,9 +211,101 @@ def analyze_alert_with_llm(alert: dict, avg_vol: float) -> Optional[str]:
     return get_llm_analysis(prompt)
 
 
+# === 信号去重状态机 ===
+
+# 信号优先级（用于判断状态升级）
+SIGNAL_PRIORITY = {
+    "正常": 0,
+    "缩量": 1,
+    "放量": 2,
+    "温放": 2,
+    "放量突破": 3,
+    "放量下跌": 3,
+    "放量止跌": 3,
+    "缩量止跌": 3,
+    "尾盘放量": 3,
+    "巨量": 4,
+}
+
+DB_PATH = ROOT / "data" / "ratios.db"
+
+
+def get_signal_state(ticker: str) -> Optional[str]:
+    """获取 ticker 的上一次信号状态"""
+    if not DB_PATH.exists():
+        return None
+    try:
+        with sqlite3.connect(DB_PATH, timeout=5) as conn:
+            # 确保表存在
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS signal_states (
+                    ticker TEXT PRIMARY KEY,
+                    state TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            row = conn.execute(
+                "SELECT state FROM signal_states WHERE ticker = ?", (ticker,)
+            ).fetchone()
+            return row[0] if row else None
+    except sqlite3.Error:
+        return None
+
+
+def update_signal_state(ticker: str, state: str):
+    """更新 ticker 的信号状态"""
+    if not DB_PATH.exists():
+        return
+    try:
+        with sqlite3.connect(DB_PATH, timeout=5) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS signal_states (
+                    ticker TEXT PRIMARY KEY,
+                    state TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                INSERT INTO signal_states (ticker, state, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(ticker) DO UPDATE SET state = ?, updated_at = ?
+            """, (ticker, state, datetime.now().isoformat(), state, datetime.now().isoformat()))
+    except sqlite3.Error:
+        pass
+
+
+def should_push(ticker: str, new_state: str) -> bool:
+    """
+    信号去重判断：
+    - 状态变化时推送
+    - 状态持续时静默
+    - 状态升级时再推送
+    """
+    old_state = get_signal_state(ticker)
+
+    if old_state is None:
+        # 首次出现，推送
+        return True
+
+    if old_state == new_state:
+        # 状态持续，静默
+        return False
+
+    # 状态变化，检查是否升级
+    old_priority = SIGNAL_PRIORITY.get(old_state, 0)
+    new_priority = SIGNAL_PRIORITY.get(new_state, 0)
+
+    if new_priority > old_priority:
+        # 状态升级，推送
+        return True
+
+    # 状态降级或同级变化，也推送（从放量回到正常是重要信息）
+    return True
+
+
 def scan_and_alert():
-    """扫描并发送告警，触发信号时调用 LLM 分析"""
-    from compute import compute_all
+    """扫描并发送告警，触发信号时调用 LLM 分析（带去重状态机）"""
+    from compute import compute_all, save_signal
 
     config = load_config()
     feishu_config = config.get("feishu", {})
@@ -221,22 +318,44 @@ def scan_and_alert():
         print(f"[alert] 无触发信号，共扫描 {len(results)} 个标的")
         return
 
-    print(f"[alert] 检测到 {len(alerts)} 个信号，开始推送...")
+    print(f"[alert] 检测到 {len(alerts)} 个信号，开始去重判断...")
 
     # LLM 调用限制：只对强信号调用，同一 ticker 只调一次
     seen_tickers = set()
+    pushed_count = 0
+
     for alert in alerts:
         ticker = alert.get("ticker", "")
         ratio = alert.get("ratio", 0)
         signal = alert.get("signal", "")
+        source = alert.get("source", "historical")
 
-        # 判断是否需要 LLM 分析（只对强信号调用，省 API 额度）
+        # 确定信号状态
+        if signal in ("放量止跌", "放量突破", "放量下跌", "缩量止跌"):
+            new_state = signal
+        elif ratio > 2.0:
+            new_state = "放量突破" if alert.get("change_pct", 0) > 0 else "放量下跌"
+        elif ratio > 1.5:
+            new_state = "放量"
+        elif ratio < 0.6:
+            new_state = "缩量"
+        else:
+            new_state = "正常"
+
+        # 去重判断
+        if not should_push(ticker, new_state):
+            print(f"[alert] {ticker} 状态持续 ({new_state})，跳过推送")
+            continue
+
+        # 更新状态
+        update_signal_state(ticker, new_state)
+
+        # 判断是否需要 LLM 分析
         is_significant = (
             signal in ("放量突破", "放量下跌") or
             (ratio > 2.5 and alert.get("change_pct", 0) != 0)
         )
 
-        # 同一 ticker 多个 source 时只调用一次
         if ticker in seen_tickers:
             analysis = None
         elif is_significant:
@@ -246,11 +365,24 @@ def scan_and_alert():
         else:
             analysis = None
 
+        # 保存信号记录
+        name = alert.get("name", ticker)
+        save_signal(
+            ticker=ticker, name=name, signal_type=new_state,
+            ratio=ratio, price=alert.get("price", 0),
+            change_pct=alert.get("change_pct", 0), source=source,
+            llm_analysis=analysis or "", notified=1,
+        )
+
+        # 推送
         message = format_alert_message(alert, analysis)
         print(message)
         if webhook_url:
             send_feishu(message, webhook_url)
+        pushed_count += 1
         print("---")
+
+    print(f"[alert] 推送完成: {pushed_count}/{len(alerts)} 个信号")
 
 
 def send_brief_report():
@@ -287,10 +419,8 @@ def send_brief_report():
         for r in tickers:
             ratio = r.get("ratio", 0)
             change = r.get("change_pct", 0)
-            direction = "↑" if change > 0 else "↓"
-            emoji = "🔥" if ratio > 2.0 else ("⚠️" if ratio < 0.8 else "✅")
-            status = "巨量" if ratio > 5 else ("显著放量" if ratio > 2 else ("放量" if ratio > 1.2 else ("缩量" if ratio < 0.8 else "正常")))
-            lines.append(f"  {r['ticker']} {direction}{abs(change):.1f}% 量比{ratio} {emoji} {status}")
+            name = r.get("name", r["ticker"])
+            lines.append(f"  {format_ticker_line(r['ticker'], name, change, ratio)}")
         lines.append("")
 
     brief_text = "\n".join(lines)

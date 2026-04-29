@@ -79,17 +79,17 @@ def extract_fields(quote: dict, ticker: str) -> dict:
 
 
 def save_snapshot(ticker: str, data: dict):
-    """保存行情快照到 data/snapshots/{market}/"""
+    """追加写入 JSONL 文件（一行一条快照）"""
     market = get_market(ticker)
     market_dir = SNAPSHOT_DIR / market
     market_dir.mkdir(parents=True, exist_ok=True)
 
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    filename = f"{ticker.replace('.', '_')}_{ts}.json"
+    day_str = datetime.now().strftime("%Y%m%d")
+    filename = f"{ticker.replace('.', '_')}_{day_str}.jsonl"
     filepath = market_dir / filename
 
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    with open(filepath, "a", encoding="utf-8") as f:
+        f.write(json.dumps(data, ensure_ascii=False) + "\n")
 
     print(f"[collect] {ticker} -> {filepath.name}")
 

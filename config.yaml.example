@@ -2,27 +2,29 @@
 # 跨市场量比监控系统 - 配置示例文件
 # ============================================================
 # 复制此文件为 config.yaml 并填入实际值
-# 敏感信息（api_key、webhook_url）不要提交到代码仓库
+# 敏感信息（api_key、app_secret）不要提交到代码仓库
+# 修改后自动热加载，无需重启进程
 # ============================================================
 
 # ------------------------------------------------------------
 # 一、监控标的（必填）
 # ------------------------------------------------------------
+# 格式: 股票代码.市场-中文名
 watchlist:
   us:
-    - NVDL.US
-    - MUU.US
-    - CLF.US
-    - BMNR.US
-    - DRAM.US
-    - NVO.US
+    - NVDL.US-英伟达2x
+    - MUU.US-美光2x
+    - CLF.US-克利夫兰
+    - BMNR.US-BitMine
+    - DRAM.US-美光HBM
+    - NVO.US-诺和诺德
   hk:
-    - 1810.HK
-    - 700.HK
-    - 9988.HK
+    - 1810.HK-小米集团
+    - 700.HK-腾讯控股
+    - 9988.HK-阿里巴巴
   cn:
-    - 601899.SH
-    - 603308.SH
+    - 601899.SH-紫金矿业
+    - 603308.SH-应流股份
 
 # ------------------------------------------------------------
 # 二、系统参数
@@ -38,9 +40,9 @@ params:
 # ------------------------------------------------------------
 # 使用命令切换模型：python3 scripts/llm.py --switch minimax
 llm:
-  provider: "minimax"
-  model: "MiniMax-M2.7"
-  base_url: "https://api.minimaxi.com/anthropic"
+  provider: "xiaomi"
+  model: "mimo-v2.5-pro"
+  base_url: "https://token-plan-cn.xiaomimimo.com/anthropic"
   api_key: "YOUR_API_KEY_HERE"
   max_tokens: 200
   temperature: 0.3
@@ -59,7 +61,11 @@ llm_profiles:
     api_key: "YOUR_XIAOMI_API_KEY"
 
 # ------------------------------------------------------------
-# 四、飞书推送配置
+# 四、飞书配置
 # ------------------------------------------------------------
+# 方式一：自建应用（推荐，支持交互指令和富文本卡片）
 feishu:
-  webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/YOUR_WEBHOOK_TOKEN"
+  app_id: "YOUR_APP_ID"
+  app_secret: "YOUR_APP_SECRET"
+  # webhook_url 保留作为备用（自建应用模式下可选）
+  # webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/YOUR_WEBHOOK_TOKEN"

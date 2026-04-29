@@ -61,36 +61,26 @@ def fetch_prev_close(tickers: list):
 
 
 def get_prev_close(ticker: str) -> float:
-    """从最新快照文件获取昨收价"""
-    market = get_market(ticker)
-    market_dir = SNAPSHOT_DIR / market
-    if not market_dir.exists():
+    """从最新 JSONL 快照获取昨收价"""
+    jsonl_path = get_jsonl_path(ticker)
+    if not jsonl_path.exists():
         return 0.0
 
-    prefix = ticker.replace('.', '_')
-    today = datetime.now().strftime("%Y%m%d")
-
-    latest_file = None
-    latest_time = ""
-    for f in market_dir.iterdir():
-        if not f.name.startswith(prefix):
-            continue
-        # 只看今天的快照
-        if today not in f.name:
-            continue
-        ts = f.name.split('_')[-1].replace('.json', '')
-        if ts > latest_time:
-            latest_time = ts
-            latest_file = f
-
-    if latest_file:
-        try:
-            with open(latest_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return float(data.get("price", 0))
-        except (json.JSONDecodeError, OSError):
-            pass
-    return 0.0
+    last_price = 0.0
+    try:
+        with open(jsonl_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    last_price = float(data.get("price", 0))
+                except (json.JSONDecodeError, ValueError):
+                    continue
+    except OSError:
+        pass
+    return last_price
 
 
 def extract_fields(quote, ticker: str) -> dict:
@@ -133,19 +123,25 @@ def on_quote(symbol: str, quote):
         print(f"[ws] on_quote error: {e}", flush=True)
 
 
-def save_snapshot(ticker: str, data: dict):
+def get_jsonl_path(ticker: str, day: datetime = None) -> Path:
+    """获取 JSONL 文件路径：data/snapshots/{market}/{TICKER}_{YYYYMMDD}.jsonl"""
+    if day is None:
+        day = datetime.now()
     market = get_market(ticker)
     market_dir = SNAPSHOT_DIR / market
     market_dir.mkdir(parents=True, exist_ok=True)
+    day_str = day.strftime("%Y%m%d")
+    filename = f"{ticker.replace('.', '_')}_{day_str}.jsonl"
+    return market_dir / filename
 
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    filename = f"{ticker.replace('.', '_')}_{ts}.json"
-    filepath = market_dir / filename
 
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def save_snapshot(ticker: str, data: dict):
+    """追加写入 JSONL 文件（一行一条快照）"""
+    filepath = get_jsonl_path(ticker)
+    line = json.dumps(data, ensure_ascii=False)
+    with open(filepath, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
         f.flush()
-        os.fsync(f.fileno())
 
     print(f"[ws] {ticker} -> {filepath.name}", flush=True)
 
