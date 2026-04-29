@@ -533,18 +533,29 @@ def main():
         if pid > 0:
             sys.exit(0)
 
+        # 孙子进程：写入 PID 文件
+        pid_file = ROOT / "logs" / "feishu_bot.pid"
+        pid_file.parent.mkdir(exist_ok=True)
+        pid_file.write_text(str(os.getpid()))
+
         log_dir = ROOT / "logs"
         log_dir.mkdir(exist_ok=True)
-        out_fd = os.open(log_dir / "feishu_bot.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        err_fd = os.open(log_dir / "feishu_bot.err", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        os.dup2(out_fd, sys.stdout.fileno())
-        os.dup2(err_fd, sys.stderr.fileno())
-        os.close(out_fd)
-        os.close(err_fd)
 
         devnull = os.open(os.devnull, os.O_RDONLY)
-        os.dup2(devnull, sys.stdin.fileno())
+        os.dup2(devnull, 0)
         os.close(devnull)
+
+        out_fd = os.open(log_dir / "feishu_bot.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        os.dup2(out_fd, 1)
+        os.close(out_fd)
+
+        err_fd = os.open(log_dir / "feishu_bot.err", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        os.dup2(err_fd, 2)
+        os.close(err_fd)
+
+        # 用 execv 替换进程，避免 asyncio kqueue 文件描述符问题
+        # 注意：不带 --daemon 参数，避免无限循环
+        os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve())])
 
     cfg = get_feishu_config()
     api_client = create_client()
