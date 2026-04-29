@@ -155,6 +155,12 @@ def format_alert_card(alert: dict, analysis: Optional[str] = None) -> dict:
     direction = "↑" if change > 0 else "↓"
     ratio_display = format_ratio_display(ratio)
     type_label = "日内" if source == "intraday" else "5日"
+    # 信号显示加方向（如"放量 ↑" 或 "缩量 ↓"）
+    signal_name = alert["signal_detail"] or alert["signal"]
+    if signal_name in ("放量", "缩量", "放量突破", "放量下跌", "缩量止跌", "尾盘放量"):
+        signal_display = f"{signal_name} {direction}"
+    else:
+        signal_display = signals
 
     # 标题
     if ratio > 5.0:
@@ -166,13 +172,13 @@ def format_alert_card(alert: dict, analysis: Optional[str] = None) -> dict:
     else:
         header_icon = "📊"
 
-    title = f"{header_icon} 【{type_label}】{ticker}-{name}"
+    title = f"{header_icon} 【{type_label}】{ticker}-{name} {direction}"
 
     # 内容
     lines = [
         f"**当前价:** ${price} ({direction}{abs(change):.2f}%)",
         f"**量比:** {ratio:.2f} {ratio_display}",
-        f"**信号:** {signals}",
+        f"**信号:** {signal_display}",
         f"**时间:** {datetime.now().strftime('%H:%M:%S')}",
     ]
     if analysis:
