@@ -185,10 +185,32 @@ def fetch_other_groups(exclude_names: list = None) -> dict:
     return result
 
 
-def run_sync(groups: list = None) -> dict:
+def _restart_websocket():
+    """重启 WebSocket 采集进程"""
+    import subprocess, os, time, signal
+    pid_file = ROOT / "logs" / "ws_collect.pid"
+    try:
+        if pid_file.exists():
+            old_pid = int(pid_file.read_text().strip())
+            os.kill(old_pid, signal.SIGKILL)
+            time.sleep(1)
+    except (ValueError, OSError):
+        pass
+
+    # 重启 WS 采集
+    subprocess.Popen(
+        [sys.executable, str(ROOT / "scripts" / "collect_ws.py"), "--daemon"],
+        stdout=open(os.devnull, "w"),
+        stderr=open(os.devnull, "w"),
+    )
+    print("[sync] WebSocket 采集已重启", flush=True)
+
+
+def run_sync(groups: list = None, restart_ws: bool = True) -> dict:
     """
     执行完整同步流程
     groups: 长桥自选股分组名列表，默认 ["量比监控"]
+    restart_ws: 是否重启 WebSocket 采集（默认 True，保持配置同步）
     返回: {"added": [...], "removed": [...], "positions": [...], "watchlist": [...]}
     """
     if groups is None:
@@ -215,6 +237,9 @@ def run_sync(groups: list = None) -> dict:
 
     total = sum(len(v) for v in new_watchlist.values())
     print(f"[sync] 完成: {total} 个标的, 新增 {len(changes['added'])}, 移除 {len(changes['removed'])}")
+
+    if restart_ws:
+        _restart_websocket()
 
     return {
         "added": changes["added"],
