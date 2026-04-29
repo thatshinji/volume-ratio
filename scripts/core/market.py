@@ -30,11 +30,13 @@ def is_market_trading(market: str) -> bool:
     elif market == "US":
         # 美股: 9:30-16:00 ET (夏令时 UTC-4, 冬令时 UTC-5)
         # 北京时间: 夏令时 21:30-次日4:00, 冬令时 22:30-次日5:00
-        # 简化处理: 用 pytz 转换
+        # 需要先把系统本地时间转为 UTC，再转为 ET
         try:
             import pytz
             et = pytz.timezone("US/Eastern")
-            et_now = now.astimezone(et) if now.tzinfo else datetime.now(et)
+            # 先获取当前 UTC 时间，再转为 ET
+            utc_now = datetime.now(pytz.UTC)
+            et_now = utc_now.astimezone(et)
             t = et_now.hour * 100 + et_now.minute
             return 930 <= t <= 1600
         except ImportError:

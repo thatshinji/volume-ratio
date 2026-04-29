@@ -189,6 +189,8 @@ def init_db():
                 success INTEGER DEFAULT 1
             )
         """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_volume_ratios_ticker ON volume_ratios(ticker)")
     _db_initialized = True
 
 
@@ -330,7 +332,7 @@ def get_signal_detail(ratio: float, price_change: float = 0) -> str:
     elif ratio > 1.5:
         hour = datetime.now().hour
         minute = datetime.now().minute
-        if hour == 14 and minute >= 30 or hour == 15:
+        if (hour == 14 and minute >= 30) or hour == 15:
             return "尾盘放量"
     return ""
 

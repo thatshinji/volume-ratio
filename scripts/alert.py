@@ -67,14 +67,15 @@ def detect_signals(results: List[dict]) -> List[dict]:
     params = config.get("params", {})
     alert_threshold = params.get("alert_threshold", 2.0)
     shrink_threshold = params.get("shrink_threshold", 0.6)
+    mute_list = config.get("mute", {})
 
     for r in results:
-        # 跳过闭市的市场
         ticker = r.get("ticker", "")
+        if ticker in mute_list:
+            continue  # 跳过静默标的
         market = get_market(ticker)
         if not is_market_trading(market):
             continue
-        ticker = r.get("ticker", "")
         name = r.get("name", ticker)
         ratio = r.get("ratio", 0)
         change_pct = r.get("change_pct", 0)
@@ -351,11 +352,9 @@ def should_push(ticker: str, new_state: str) -> bool:
     new_priority = SIGNAL_PRIORITY.get(new_state, 0)
 
     if new_priority > old_priority:
-        # 状态升级，推送
         return True
 
-    # 状态降级或同级变化，也推送（从放量回到正常是重要信息）
-    return True
+    return False
 
 
 def scan_and_alert():
