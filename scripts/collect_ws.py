@@ -159,32 +159,58 @@ def get_client_id() -> str:
 def run_websocket():
     from longbridge.openapi import OAuthBuilder, Config, QuoteContext, SubType
 
-    client_id = get_client_id()
-    oauth = OAuthBuilder(client_id).build(lambda url: None)
-    config = Config.from_oauth(oauth)
-    ctx = QuoteContext(config)
+    max_retries = 5
+    retry_delays = [30, 60, 120, 300, 600]  # 秒：30s, 1m, 2m, 5m, 10m
 
-    config_data = load_config()
-    tickers = get_all_tickers(config_data)
-    print(f"[ws] 连接 Longbridge WebSocket，订阅 {len(tickers)} 个标的...", flush=True)
-
-    # 启动时先获取昨收价缓存
-    fetch_prev_close(tickers)
-
-    ctx.set_on_quote(on_quote)
-    ctx.subscribe(tickers, [SubType.Quote])
-    print(f"[ws] 订阅成功，等待行情推送...", flush=True)
-
-    # 主线程负责写出回调放入队列的数据
-    while running.is_set():
+    for attempt in range(max_retries):
         try:
-            symbol, data = quote_queue.get(timeout=1)
-            save_snapshot(symbol, data)
-            quote_queue.task_done()
-        except queue.Empty:
-            continue
-        except (OSError, ValueError, KeyError) as e:
-            print(f"[ws] error: {e}", flush=True)
+            client_id = get_client_id()
+            oauth = OAuthBuilder(client_id).build(lambda url: None)
+            config = Config.from_oauth(oauth)
+            ctx = QuoteContext(config)
+
+            config_data = load_config()
+            tickers = get_all_tickers(config_data)
+            print(f"[ws] 连接 Longbridge WebSocket，订阅 {len(tickers)} 个标的...", flush=True)
+
+            # 启动时先获取昨收价缓存
+            fetch_prev_close(tickers)
+
+            ctx.set_on_quote(on_quote)
+            ctx.subscribe(tickers, [SubType.Quote])
+            print(f"[ws] 订阅成功，等待行情推送...", flush=True)
+
+            # 连接成功，重置重试计数
+            # 主线程负责写出回调放入队列的数据
+            while running.is_set():
+                try:
+                    symbol, data = quote_queue.get(timeout=1)
+                    save_snapshot(symbol, data)
+                    quote_queue.task_done()
+                except queue.Empty:
+                    continue
+                except (OSError, ValueError, KeyError) as e:
+                    print(f"[ws] error: {e}", flush=True)
+
+            # running 被清除，正常退出
+            return
+
+        except (OSError, ConnectionError, TimeoutError) as e:
+            delay = retry_delays[min(attempt, len(retry_delays) - 1)]
+            print(f"[ws] 连接失败 (第 {attempt + 1}/{max_retries} 次): {e}", flush=True)
+            if attempt < max_retries - 1:
+                print(f"[ws] {delay} 秒后重试...", flush=True)
+                for _ in range(delay):
+                    if not running.is_set():
+                        return
+                    time.sleep(1)
+            else:
+                print(f"[ws] 已达最大重试次数，停止采集。launcher 将在下次检查时重启", flush=True)
+                return
+
+        except Exception as e:
+            print(f"[ws] 未知异常: {e}", flush=True)
+            return
 
 
 def signal_handler(signum, frame):
