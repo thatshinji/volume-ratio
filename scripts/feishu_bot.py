@@ -291,31 +291,48 @@ def build_sync_card() -> dict:
             "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": f"错误: {e}"}}],
         }
 
-    lines = []
-    # 持仓
-    lines.append(f"**持仓 ({len(result['positions'])}):** {', '.join(result['positions']) or '无'}")
-    lines.append(f"**自选股 ({len(result['watchlist'])}):** {', '.join(result['watchlist']) or '无'}")
-    lines.append("")
-
-    # 变更
+    summary_lines = []
+    summary_lines.append(f"**持仓 ({len(result['positions'])}):** {', '.join(result['positions']) or '无'}")
+    summary_lines.append(f"**自选股 ({len(result['watchlist'])}):** {', '.join(result['watchlist']) or '无'}")
+    summary_lines.append("")
     if result["added"]:
-        lines.append(f"**新增:** {', '.join(result['added'])}")
+        summary_lines.append(f"**新增:** {', '.join(result['added'])}")
     if result["removed"]:
-        lines.append(f"**移除:** {', '.join(result['removed'])}")
+        summary_lines.append(f"**移除:** {', '.join(result['removed'])}")
     if not result["added"] and not result["removed"]:
-        lines.append("**无变更**")
-    lines.append("")
+        summary_lines.append("**无变更**")
 
-    # 最终列表
+    elements = [{"tag": "markdown", "content": "\n".join(summary_lines)}]
+
+    # 最终列表用原生表格
+    columns = [
+        {"name": "ticker", "display_name": "标的", "width": "auto", "horizontal_align": "left", "data_type": "text"},
+    ]
     for market_label, key in [("🇺🇸 美股", "us"), ("🇭🇰 港股", "hk"), ("🇨🇳 A股", "cn")]:
         tickers = result["final"].get(key, [])
-        if tickers:
-            lines.append(f"**{market_label} ({len(tickers)}):** {', '.join(tickers)}")
+        if not tickers:
+            continue
+        rows = [{"ticker": t} for t in tickers]
+        elements.append({"tag": "markdown", "content": f"**{market_label} ({len(tickers)})**"})
+        elements.append({
+            "tag": "table",
+            "page_size": len(rows),
+            "row_height": "low",
+            "header_style": {
+                "text_align": "left",
+                "text_size": "normal",
+                "background_style": "grey",
+                "bold": True,
+                "lines": 1,
+            },
+            "columns": columns,
+            "rows": rows,
+        })
 
     return {
         "config": {"wide_screen_mode": True},
         "header": {"title": {"tag": "plain_text", "content": "🔄 同步监控列表"}},
-        "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}}],
+        "elements": elements,
     }
 
 
