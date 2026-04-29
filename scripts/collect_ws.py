@@ -216,6 +216,7 @@ def run_websocket():
 def signal_handler(signum, frame):
     print("\n[ws] 收到退出信号，正在关闭...", flush=True)
     running.clear()
+    sys.exit(0)
 
 
 if __name__ == "__main__":

@@ -977,6 +977,7 @@ def main():
     def signal_handler(signum, frame):
         print("\n[bot] 收到退出信号，正在关闭...", flush=True)
         running.clear()
+        sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
