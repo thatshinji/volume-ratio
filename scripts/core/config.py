@@ -31,13 +31,32 @@ def load_config() -> dict:
     return _config_cache or {}
 
 
+def remove_ticker_from_config(ticker: str) -> bool:
+    """从 config.yaml watchlist 中移除指定标的"""
+    config = load_config()
+    removed = False
+    for market in ["us", "hk", "cn"]:
+        items = config.get("watchlist", {}).get(market, [])
+        new_items = [item for item in items if not item.startswith(ticker + "-") and item != ticker]
+        if len(new_items) < len(items):
+            config["watchlist"][market] = new_items
+            removed = True
+    if removed:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            yaml.dump(config, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+    return removed
+
+
 def parse_ticker(raw: str) -> Tuple[str, str]:
     """
     解析带中文名的 ticker 格式
-    'CLF.US-克利夫兰' → ('CLF.US', '克利夫兰')
-    'CLF.US'          → ('CLF.US', 'CLF.US')
+    'CLF.US-克利夫兰'      → ('CLF.US', '克利夫兰')
+    '1810.HK-XIAOMI-W'    → ('1810.HK', 'XIAOMI-W')
+    'CLF.US'               → ('CLF.US', 'CLF.US')
     """
-    if '-' in raw:
-        parts = raw.rsplit('-', 1)
-        return (parts[0], parts[1])
+    import re
+    # ticker 格式: 字母/数字.市场后缀，如 CLF.US、1810.HK、600029.SH
+    m = re.match(r'^([A-Za-z0-9]+\.[A-Za-z]+)-(.+)$', raw)
+    if m:
+        return (m.group(1), m.group(2))
     return (raw, raw)

@@ -121,6 +121,27 @@ def sync_to_config(new_watchlist: dict) -> dict:
     return {"added": added, "removed": removed, "unchanged": unchanged}
 
 
+def remove_from_watchlist(ticker: str, group_name: str = "量比监控") -> bool:
+    """从长桥自选股分组中移除指定标的"""
+    try:
+        quote_ctx, _ = _get_longbridge_context()
+        for group in quote_ctx.watchlist():
+            if group.name == group_name:
+                from longbridge.openapi import SecuritiesUpdateMode
+                quote_ctx.update_watchlist_group(
+                    id=group.id,
+                    securities=[ticker],
+                    mode=SecuritiesUpdateMode.Remove,
+                )
+                print(f"[sync] 已从「{group_name}」移除: {ticker}")
+                return True
+        print(f"[sync] 未找到分组: {group_name}")
+        return False
+    except Exception as e:
+        print(f"[sync] 移除失败: {e}")
+        return False
+
+
 def run_sync(groups: list = None) -> dict:
     """
     执行完整同步流程

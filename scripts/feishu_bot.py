@@ -24,8 +24,11 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import *
 from lark_oapi.ws import Client as WsClient
+from lark_oapi.ws.enum import MessageType
+from lark_oapi.core.json import JSON
+from lark_oapi.core.const import UTF_8
 
-from core.config import load_config
+from core.config import load_config, parse_ticker, remove_ticker_from_config
 from core.market import get_all_tickers_with_names, get_ticker_name
 from core.display import format_ratio_display, format_ticker_line, build_market_table, build_brief_elements
 
@@ -302,6 +305,101 @@ def build_brief_card() -> dict:
     }
 
 
+def build_watchlist_card() -> dict:
+    """构建关注列表卡片（带删除按钮）"""
+    config = load_config()
+    elements = []
+
+    for market, label in [("us", "🇺🇸 美股"), ("hk", "🇭🇰 港股"), ("cn", "🇨🇳 A股")]:
+        items = config.get("watchlist", {}).get(market, [])
+        if not items:
+            continue
+
+        elements.append({"tag": "markdown", "content": f"**{label}**"})
+
+        rows = []
+        for raw in items:
+            ticker, name = parse_ticker(raw)
+            rows.append({"ticker": f"{ticker}-{name}", "action": "删除"})
+
+        elements.append({
+            "tag": "table",
+            "page_size": len(rows),
+            "row_height": "low",
+            "header_style": {
+                "text_align": "left",
+                "text_size": "normal",
+                "background_style": "grey",
+                "bold": True,
+                "lines": 1,
+            },
+            "columns": [
+                {"name": "ticker", "display_name": "标的", "width": "auto", "horizontal_align": "left", "data_type": "text"},
+                {"name": "action", "display_name": "操作", "width": "auto", "horizontal_align": "center", "data_type": "text"},
+            ],
+            "rows": rows,
+        })
+
+        buttons = []
+        for raw in items:
+            ticker, name = parse_ticker(raw)
+            buttons.append({
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": f"❌ {ticker}"},
+                "type": "danger",
+                "value": {"action": "remove", "ticker": ticker, "name": name},
+            })
+        elements.append({"tag": "action", "actions": buttons})
+
+    if not elements:
+        elements = [{"tag": "div", "text": {"tag": "lark_md", "content": "关注列表为空"}}]
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"title": {"tag": "plain_text", "content": "📋 关注列表"}},
+        "elements": elements,
+    }
+
+
+def handle_card_action(data) -> "P2CardActionTriggerResponse":
+    """处理卡片按钮点击回调"""
+    from longbridge_sync import remove_from_watchlist
+
+    action = data.event.action
+    value = action.value or {}
+    action_type = value.get("action", "")
+
+    if action_type == "remove":
+        ticker = value.get("ticker", "")
+        name = value.get("name", "")
+
+        # 从 config.yaml 移除
+        remove_ticker_from_config(ticker)
+
+        # 从长桥自选股移除
+        try:
+            remove_from_watchlist(ticker)
+        except Exception as e:
+            print(f"[bot] 长桥删除失败: {e}", flush=True)
+
+        print(f"[bot] 已移除: {ticker}-{name}", flush=True)
+
+        # 返回更新后的卡片
+        from lark_oapi.event.callback.model.p2_card_action_trigger import (
+            P2CardActionTriggerResponse, CallBackToast, CallBackCard,
+        )
+        resp = P2CardActionTriggerResponse()
+        resp.toast = CallBackToast()
+        resp.toast.type = "info"
+        resp.toast.content = f"已移除 {ticker}-{name}"
+        resp.card = CallBackCard()
+        resp.card.type = "raw"
+        resp.card.data = build_watchlist_card()
+        return resp
+
+    return None
+
+
 def _check_component_status() -> dict:
     """检查各组件运行状态"""
     import sqlite3
@@ -507,8 +605,12 @@ def handle_command(client: lark.Client, chat_id: str, text: str):
         card = build_sync_card()
         send_card(client, chat_id, card)
 
+    elif text == "/watchlist":
+        card = build_watchlist_card()
+        send_card(client, chat_id, card)
+
     else:
-        send_text(client, chat_id, f"未知指令: {text}\n\n可用指令:\n/start - 启动量比系统\n/stop - 关停量比系统\n/sync - 同步长桥持仓+自选股\n/status - 系统状态\n/scan - 量比扫描\n/signals - 今日信号\n/brief - 量比简报\n/add CLF.US-名称 - 添加标的\n/remove CLF.US - 移除标的\n/mute CLF.US 2h - 静默\n/history CLF.US - 历史量比")
+        send_text(client, chat_id, f"未知指令: {text}\n\n可用指令:\n/start - 启动量比系统\n/stop - 关停量比系统\n/sync - 同步长桥持仓+自选股\n/watchlist - 关注列表（可删除）\n/status - 系统状态\n/scan - 量比扫描\n/signals - 今日信号\n/brief - 量比简报\n/add CLF.US-名称 - 添加标的\n/remove CLF.US - 移除标的\n/mute CLF.US 2h - 静默\n/history CLF.US - 历史量比")
 
 
 def on_message(client: lark.Client, event: lark.EventDispatcherHandler):
@@ -579,10 +681,14 @@ def main():
         except Exception as e:
             print(f"[bot] 消息处理异常: {e}", flush=True)
 
-    # 注册事件处理器
+    # 注册事件处理器（消息 + 卡片回调）
     event_handler = lark.EventDispatcherHandler.builder(
         "", ""  # encrypt_key, verification_token（长连接模式不需要）
-    ).register_p2_im_message_receive_v1(handle_p2_im_message_receive_v1).build()
+    ).register_p2_im_message_receive_v1(
+        handle_p2_im_message_receive_v1
+    ).register_p2_card_action_trigger(
+        handle_card_action
+    ).build()
 
     # 创建 WebSocket 客户端
     ws_client = WsClient(
@@ -591,6 +697,63 @@ def main():
         event_handler=event_handler,
         log_level=lark.LogLevel.INFO,
     )
+
+    # Monkey-patch: 让 WsClient 处理 CARD 消息（原版会静默丢弃）
+    from lark_oapi.ws.const import HEADER_TYPE, HEADER_MESSAGE_ID, HEADER_TRACE_ID, HEADER_SUM, HEADER_SEQ, HEADER_BIZ_RT
+    from lark_oapi.ws.model import Response as WsResponse
+
+    original_handle = ws_client._handle_data_frame
+
+    async def patched_handle(frame):
+        hs = frame.headers
+        msg_id = None
+        sum_ = "1"
+        seq = "0"
+        type_ = None
+        for h in hs:
+            if h.key == HEADER_MESSAGE_ID:
+                msg_id = h.value
+            elif h.key == HEADER_SUM:
+                sum_ = h.value
+            elif h.key == HEADER_SEQ:
+                seq = h.value
+            elif h.key == HEADER_TYPE:
+                type_ = h.value
+
+        pl = frame.payload
+        if int(sum_) > 1:
+            pl = ws_client._combine(msg_id, int(sum_), int(seq), pl)
+            if pl is None:
+                return
+
+        message_type = MessageType(type_)
+        resp = WsResponse(code=200)
+
+        try:
+            import time
+            start = int(round(time.time() * 1000))
+            if message_type == MessageType.EVENT:
+                result = ws_client._event_handler.do_without_validation(pl)
+            elif message_type == MessageType.CARD:
+                result = ws_client._event_handler.do_without_validation(pl)
+            else:
+                return
+
+            end = int(round(time.time() * 1000))
+            header = hs.add()
+            header.key = HEADER_BIZ_RT
+            header.value = str(end - start)
+            if result is not None:
+                import base64
+                resp.data = base64.b64encode(JSON.marshal(result).encode(UTF_8))
+        except Exception as e:
+            print(f"[bot] 消息处理异常: {e}", flush=True)
+            resp = WsResponse(code=500)
+
+        frame.payload = JSON.marshal(resp).encode(UTF_8)
+        await ws_client._write_message(frame.SerializeToString())
+
+    ws_client._handle_data_frame = patched_handle
 
     def signal_handler(signum, frame):
         print("\n[bot] 收到退出信号，正在关闭...", flush=True)
