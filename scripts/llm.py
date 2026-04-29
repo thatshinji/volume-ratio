@@ -8,6 +8,7 @@ Usage:
     result = call_llm("分析以下数据...")
 """
 
+import sys
 import requests
 from typing import Optional
 from pathlib import Path
@@ -15,11 +16,17 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 CONFIG_PATH = ROOT / "config.yaml"
 
+# 将 scripts/ 加入 sys.path
+sys.path.insert(0, str(ROOT / "scripts"))
 
-def load_config() -> dict:
-    import yaml
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+from core.config import load_config
+
+
+def mask_key(key: str) -> str:
+    """脱敏显示 API Key，只显示前6位和后4位"""
+    if not key or len(key) < 12:
+        return "***"
+    return f"{key[:6]}...{key[-4:]}"
 
 
 def get_llm_config() -> dict:
@@ -97,8 +104,6 @@ def call_llm(prompt: str, model: str = None) -> Optional[str]:
     base_url = cfg.get("base_url", "")
     model_name = model or cfg.get("model", "")
 
-    provider = cfg.get("provider", "minimax")
-
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
@@ -126,16 +131,11 @@ def call_llm(prompt: str, model: str = None) -> Optional[str]:
                     return item.get("text", "")
             return None
         else:
-            print(f"[llm] API 错误: {resp.status_code} {resp.text[:200]}")
+            print(f"[llm] API 错误: {resp.status_code}")
             return None
-    except Exception as e:
+    except (requests.ConnectionError, requests.Timeout, ValueError) as e:
         print(f"[llm] 调用异常: {e}")
         return None
-
-
-def switch_profile(profile: str) -> bool:
-    """切换 LLM 配置"""
-    return switch_llm(profile)
 
 
 if __name__ == "__main__":
@@ -158,7 +158,9 @@ if __name__ == "__main__":
         else:
             print("切换失败")
     elif args.test:
-        print(f"当前配置: {get_llm_config()}")
+        cfg = get_llm_config()
+        safe_cfg = {k: mask_key(v) if k == "api_key" else v for k, v in cfg.items()}
+        print(f"当前配置: {safe_cfg}")
         result = call_llm("说一句简短的话，5字以内")
         print(f"测试结果: {result}")
     else:

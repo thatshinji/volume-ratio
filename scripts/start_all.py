@@ -6,21 +6,26 @@
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
 LOG_DIR = ROOT / "logs"
+VENV_PYTHON = ROOT / ".venv" / "bin" / "python"
+SCRIPTS_DIR = ROOT / "scripts"
+
 
 def add_cron(line: str):
     """添加 cron 任务（如果不存在）"""
-    result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    result = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=30)
     current = result.stdout
     if line in current:
         print(f"[start] cron 已存在: {line.strip()}")
         return
     new_cron = current + line + "\n"
-    p = subprocess.run(["crontab", "-"], input=new_cron.encode(), capture_output=True)
+    p = subprocess.run(["crontab", "-"], input=new_cron.encode(), capture_output=True, timeout=30)
     print(f"[start] 已添加 cron: {line.strip()}")
+
 
 def start_websocket():
     """直接启动 WebSocket 采集进程"""
@@ -51,27 +56,32 @@ def start_websocket():
     os.dup2(devnull, 0)
     os.close(devnull)
 
-    out_fd = os.open(LOG_DIR / "ws_collect.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    out_fd = os.open(LOG_DIR / "ws_collect.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     os.dup2(out_fd, 1)
     os.close(out_fd)
 
-    err_fd = os.open(LOG_DIR / "ws_collect.err", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    err_fd = os.open(LOG_DIR / "ws_collect.err", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     os.dup2(err_fd, 2)
     os.close(err_fd)
 
-    import sys
-    os.execv(sys.executable, [sys.executable, str(ROOT / "scripts" / "collect_ws.py")])
+    os.execv(sys.executable, [sys.executable, str(SCRIPTS_DIR / "collect_ws.py")])
 
 
 def main():
     print("=== 一键启动跨市场量比监控服务 ===")
     print()
 
+    # 动态构建 cron 命令（使用 ROOT 和 sys.executable）
+    launcher_script = SCRIPTS_DIR / "collect_ws_launcher.py"
+    alert_script = SCRIPTS_DIR / "alert.py"
+    python_bin = str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
+    launcher_python = "/usr/bin/python3"  # launcher 必须用系统 Python（longbridge 未装在 venv）
+
     # 1. 添加 cron 任务
     print("[1/3] 配置 cron 任务...")
-    add_cron("*/1 * * * 1-5 /usr/bin/python3 /Users/shinji/project-x/volume-ratio/scripts/collect_ws_launcher.py >> /Users/shinji/project-x/volume-ratio/logs/launcher.log 2>&1")
-    add_cron("*/1 * * * 1-5 /Users/shinji/project-x/volume-ratio/.venv/bin/python /Users/shinji/project-x/volume-ratio/scripts/alert.py >> /Users/shinji/project-x/volume-ratio/logs/alert.log 2>&1")
-    add_cron("*/30 * * * 1-5 /Users/shinji/project-x/volume-ratio/.venv/bin/python /Users/shinji/project-x/volume-ratio/scripts/alert.py --brief >> /Users/shinji/project-x/volume-ratio/logs/brief.log 2>&1")
+    add_cron(f"*/1 * * * 1-5 {launcher_python} {launcher_script} >> {LOG_DIR}/launcher.log 2>&1")
+    add_cron(f"*/1 * * * 1-5 {python_bin} {alert_script} >> {LOG_DIR}/alert.log 2>&1")
+    add_cron(f"*/30 * * * 1-5 {python_bin} {alert_script} --brief >> {LOG_DIR}/brief.log 2>&1")
     print()
 
     # 2. 启动 WebSocket 采集进程
@@ -83,7 +93,7 @@ def main():
     print("[3/3] 验证运行状态...")
     import time
     time.sleep(2)
-    result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    result = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=30)
     print("当前 cron 配置:")
     for line in result.stdout.split("\n"):
         if "volume-ratio" in line:

@@ -15,25 +15,13 @@ from typing import Optional
 
 # 项目根目录
 ROOT = Path(__file__).parent.parent
-CONFIG_PATH = ROOT / "config.yaml"
 SNAPSHOT_DIR = ROOT / "data" / "snapshots"
 
+# 将 scripts/ 加入 sys.path
+sys.path.insert(0, str(ROOT / "scripts"))
 
-def load_config() -> dict:
-    import yaml
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
-
-
-def get_market(ticker: str) -> str:
-    """根据 ticker 后缀判断市场"""
-    if ticker.endswith(".US"):
-        return "US"
-    elif ticker.endswith(".HK"):
-        return "HK"
-    elif ticker.endswith(".SH") or ticker.endswith(".SZ"):
-        return "CN"
-    return "US"
+from core.config import load_config
+from core.market import get_market, get_all_tickers
 
 
 def get_longbridge_quote(ticker: str) -> Optional[dict]:
@@ -96,7 +84,7 @@ def save_snapshot(ticker: str, data: dict):
     market_dir = SNAPSHOT_DIR / market
     market_dir.mkdir(parents=True, exist_ok=True)
 
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     filename = f"{ticker.replace('.', '_')}_{ts}.json"
     filepath = market_dir / filename
 
@@ -109,11 +97,7 @@ def save_snapshot(ticker: str, data: dict):
 def collect_all():
     """采集所有监控标的"""
     config = load_config()
-    watchlist = config.get("watchlist", {})
-
-    tickers = []
-    for market in ["us", "hk", "cn"]:
-        tickers.extend(watchlist.get(market, []))
+    tickers = get_all_tickers(config)
 
     print(f"[collect] 开始采集 {len(tickers)} 个标的...")
 

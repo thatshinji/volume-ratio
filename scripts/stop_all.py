@@ -12,9 +12,10 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 LOG_DIR = ROOT / "logs"
 
+
 def remove_cron(keyword: str):
     """移除包含关键字的 cron 任务"""
-    result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    result = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=30)
     if not result.stdout:
         return
 
@@ -22,13 +23,13 @@ def remove_cron(keyword: str):
     new_lines = [line for line in lines if keyword not in line]
     new_cron = "\n".join(new_lines)
 
-    p = subprocess.run(["crontab", "-"], input=new_cron.encode(), capture_output=True)
+    p = subprocess.run(["crontab", "-"], input=new_cron.encode(), capture_output=True, timeout=30)
     print(f"[stop] 已移除 cron: {keyword[:50]}...")
 
 
 def kill_collect_ws():
     """杀掉所有 collect_ws 进程"""
-    result = subprocess.run(["ps", "aux"], capture_output=True, text=True)
+    result = subprocess.run(["ps", "aux"], capture_output=True, text=True, timeout=30)
     killed = []
     for line in result.stdout.split("\n"):
         if "collect_ws.py" in line and "grep" not in line:
@@ -64,7 +65,7 @@ def main():
 
     # 3. 验证
     print("[验证] 当前 cron 配置:")
-    result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    result = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=30)
     if result.stdout:
         for line in result.stdout.split("\n"):
             if line.strip():

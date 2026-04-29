@@ -47,7 +47,8 @@ def check_and_launch():
 
     pid = os.fork()
     if pid > 0:
-        PID_FILE.write_text(str(pid))
+        # 等待子进程完成 fork，确保 PID 文件写入
+        time.sleep(0.5)
         return
 
     # 子进程：创建新 session 成为后台进程
@@ -57,16 +58,19 @@ def check_and_launch():
     if pid > 0:
         sys.exit(0)
 
-    # 孙子进程：重定向标准 IO
+    # 孙子进程：写入自己的 PID（而非中间进程的 PID）
+    PID_FILE.write_text(str(os.getpid()))
+
+    # 重定向标准 IO
     devnull = os.open(os.devnull, os.O_RDONLY)
     os.dup2(devnull, sys.stdin.fileno())
     os.close(devnull)
 
-    out_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    out_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     os.dup2(out_fd, sys.stdout.fileno())
     os.close(out_fd)
 
-    err_fd = os.open(err_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    err_fd = os.open(err_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     os.dup2(err_fd, sys.stderr.fileno())
     os.close(err_fd)
 

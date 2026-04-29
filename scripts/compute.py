@@ -14,25 +14,14 @@ from pathlib import Path
 from typing import Optional, List
 
 ROOT = Path(__file__).parent.parent
-CONFIG_PATH = ROOT / "config.yaml"
 SNAPSHOT_DIR = ROOT / "data" / "snapshots"
 DB_PATH = ROOT / "data" / "ratios.db"
 
+# 将 scripts/ 加入 sys.path
+sys.path.insert(0, str(ROOT / "scripts"))
 
-def load_config() -> dict:
-    import yaml
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
-
-
-def get_market(ticker: str) -> str:
-    if ticker.endswith(".US"):
-        return "US"
-    elif ticker.endswith(".HK"):
-        return "HK"
-    elif ticker.endswith(".SH") or ticker.endswith(".SZ"):
-        return "CN"
-    return "US"
+from core.config import load_config
+from core.market import get_market, get_all_tickers
 
 
 def parse_timestamp(ts: str) -> Optional[datetime]:
@@ -162,41 +151,33 @@ def get_db_path() -> Path:
     return DB_PATH
 
 
+# 数据库初始化标志
+_db_initialized = False
+
+
 def init_db():
-    """初始化 SQLite 数据库"""
+    """初始化 SQLite 数据库（只执行一次）"""
+    global _db_initialized
+    if _db_initialized:
+        return
+
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS volume_ratios (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ticker TEXT NOT NULL,
-            timestamp TEXT NOT NULL,
-            ratio REAL,
-            volume_today REAL,
-            volume_avg5 REAL,
-            price REAL,
-            change_pct REAL,
-            signal TEXT,
-            UNIQUE(ticker, timestamp)
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS daily_summary (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ticker TEXT NOT NULL,
-            date TEXT NOT NULL,
-            avg_ratio REAL,
-            max_ratio REAL,
-            min_ratio REAL,
-            final_price REAL,
-            final_change_pct REAL,
-            signal TEXT,
-            UNIQUE(ticker, date)
-        )
-    """)
-    conn.commit()
-    conn.close()
+    with sqlite3.connect(db_path, timeout=30) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS volume_ratios (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                ratio REAL,
+                volume_today REAL,
+                volume_avg5 REAL,
+                price REAL,
+                change_pct REAL,
+                signal TEXT,
+                UNIQUE(ticker, timestamp)
+            )
+        """)
+    _db_initialized = True
 
 
 def calc_volume_ratio(ticker: str, current_time: datetime = None) -> tuple:
@@ -351,20 +332,18 @@ def save_ratio(ticker: str, ratio: float, volume_today: float, volume_avg5: floa
                price: float, change_pct: float, signal: str):
     """保存量比到数据库"""
     init_db()
-    conn = sqlite3.connect(get_db_path())
-    c = conn.cursor()
+    db_path = get_db_path()
     now = datetime.now().isoformat()
 
     try:
-        c.execute("""
-            INSERT INTO volume_ratios
-            (ticker, timestamp, ratio, volume_today, volume_avg5, price, change_pct, signal)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (ticker, now, ratio, volume_today, volume_avg5, price, change_pct, signal))
-        conn.commit()
+        with sqlite3.connect(db_path, timeout=30) as conn:
+            conn.execute("""
+                INSERT INTO volume_ratios
+                (ticker, timestamp, ratio, volume_today, volume_avg5, price, change_pct, signal)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (ticker, now, ratio, volume_today, volume_avg5, price, change_pct, signal))
     except sqlite3.IntegrityError:
         pass
-    conn.close()
 
 
 def get_latest_snapshot(ticker: str) -> Optional[dict]:
@@ -375,14 +354,13 @@ def get_latest_snapshot(ticker: str) -> Optional[dict]:
 def compute_all() -> List[dict]:
     """计算所有监控标的的量比"""
     config = load_config()
-    watchlist = config.get("watchlist", {})
+    tickers = get_all_tickers(config)
 
     results = []
-    for market in ["us", "hk", "cn"]:
-        for ticker in watchlist.get(market, []):
-            result = compute_ticker(ticker)
-            if result:
-                results.append(result)
+    for ticker in tickers:
+        result = compute_ticker(ticker)
+        if result:
+            results.append(result)
     return results
 
 
