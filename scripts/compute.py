@@ -387,7 +387,63 @@ def compute_all() -> List[dict]:
         result = compute_ticker(ticker)
         if result:
             results.append(result)
+
+    # 对价格为 0 的标的，批量从 API 获取最新价格
+    zero_tickers = [r["ticker"] for r in results if r.get("price", 0) == 0]
+    if zero_tickers:
+        api_prices = _fetch_price_from_api(zero_tickers)
+        for r in results:
+            if r["ticker"] in api_prices:
+                r["price"] = api_prices[r["ticker"]]["price"]
+                r["change_pct"] = api_prices[r["ticker"]]["change_pct"]
+
     return results
+
+
+def _fetch_price_from_api(tickers: list) -> dict:
+    """从长桥 API 批量获取最新价格（用于无快照数据的标的）"""
+    if not tickers:
+        return {}
+    try:
+        import io
+        from longbridge.openapi import OAuthBuilder, Config, QuoteContext
+        token_dir = Path.home() / ".longbridge" / "openapi" / "tokens"
+        files = list(token_dir.iterdir())
+        if not files:
+            return {}
+        cid = files[0].name
+        # 抑制 SDK 的 stdout 输出（SDK 可能直接写 fd 1）
+        old_stdout_fd = os.dup(1)
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 1)
+        os.close(devnull)
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            oauth = OAuthBuilder(cid).build(lambda url: None)
+            config = Config.from_oauth(oauth)
+            ctx = QuoteContext(config)
+            quotes = ctx.quote(tickers)
+        finally:
+            sys.stdout = old_stdout
+            os.dup2(old_stdout_fd, 1)
+            os.close(old_stdout_fd)
+        result = {}
+        for q in quotes:
+            last = float(q.last_done or 0)
+            prev = float(q.prev_close or 0)
+            change_pct = ((last - prev) / prev * 100) if prev > 0 else 0
+            result[q.symbol] = {"price": last, "change_pct": round(change_pct, 2)}
+        return result
+    except Exception as e:
+        try:
+            sys.stdout = old_stdout
+            os.dup2(old_stdout_fd, 1)
+            os.close(old_stdout_fd)
+        except Exception:
+            pass
+        print(f"[compute] API 价格获取失败: {e}", flush=True)
+        return {}
 
 
 def compute_ticker(ticker: str) -> Optional[dict]:
