@@ -88,7 +88,7 @@ def build_market_table(label: str, tickers: list) -> list:
 
 
 def build_brief_elements(sorted_results: list) -> list:
-    """构建简报的飞书卡片元素列表（原生表格）"""
+    """构建简报的飞书卡片元素列表（markdown 表格）"""
     us = [r for r in sorted_results if r["ticker"].endswith(".US")]
     hk = [r for r in sorted_results if r["ticker"].endswith(".HK")]
     cn = [r for r in sorted_results if r["ticker"].endswith((".SH", ".SZ"))]
@@ -97,5 +97,21 @@ def build_brief_elements(sorted_results: list) -> list:
     for label, tickers in [("🇺🇸 美股", us), ("🇭🇰 港股", hk), ("🇨🇳 A股", cn)]:
         if not tickers:
             continue
-        elements.extend(build_market_table(label, tickers))
+
+        lines = [f"**{label}**"]
+        lines.append("| 标的 | 价格 | 涨跌 | 量比 | 状态 |")
+        lines.append("| --- | ---: | ---: | ---: | --- |")
+        for r in tickers:
+            ratio = r.get("ratio", 0)
+            change = r.get("change_pct", 0)
+            name = r.get("name", r["ticker"])
+            ticker = r["ticker"]
+            price = r.get("price", 0)
+            direction = "↑" if change > 0 else "↓"
+            ratio_display = format_ratio_display(ratio)
+            emoji = "🔥" if ratio > 2.0 else ("⚠️" if ratio < 0.8 else "✅")
+            lines.append(
+                f"| {ticker}-{name} | ${price} | {direction}{abs(change):.1f}% | {ratio:.1f} | {emoji} {ratio_display} |"
+            )
+        elements.append({"tag": "markdown", "content": "\n".join(lines)})
     return elements
