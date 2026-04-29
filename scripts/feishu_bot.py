@@ -362,9 +362,8 @@ def build_watchlist_card() -> dict:
 
 
 def build_allstock_card() -> dict:
-    """构建全部股票卡片（排除量比监控和持仓，带添加按钮）"""
+    """构建全部股票分组列表卡片（一级导航）"""
     from longbridge_sync import fetch_other_groups
-    MAX_PER_GROUP = 15  # 每组最多显示的股票数
 
     try:
         groups = fetch_other_groups(exclude_names=["量比监控"])
@@ -382,45 +381,91 @@ def build_allstock_card() -> dict:
             "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "无其他自选股分组"}}],
         }
 
-    elements = []
-    total_shown = 0
-
+    # 分组列表
+    lines = []
     for group_name, stocks in groups.items():
-        shown = stocks[:MAX_PER_GROUP]
-        remaining = len(stocks) - len(shown)
+        lines.append(f"**📁 {group_name}** — {len(stocks)} 只")
+    elements = [{"tag": "markdown", "content": "\n".join(lines)}]
 
-        # 文本列表
-        lines = []
-        for ticker, name in shown:
-            lines.append(f"**{ticker}**-{name}")
-        if remaining > 0:
-            lines.append(f"_...还有 {remaining} 只_")
-
-        elements.append({"tag": "markdown", "content": f"**📁 {group_name}（{len(stocks)} 只）**\n" + "\n".join(lines)})
-
-        # 按钮：只给展示的股票加按钮，每行 5 个
-        for i in range(0, len(shown), 5):
-            chunk = shown[i:i + 5]
-            buttons = []
-            for ticker, name in chunk:
-                buttons.append({
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": f"➕ {ticker}"},
-                    "type": "primary",
-                    "value": {"action": "add_to_monitor", "ticker": ticker, "name": name},
-                })
-            elements.append({"tag": "action", "actions": buttons})
-
-        total_shown += len(shown)
-
-    # 底部提示
-    total_all = sum(len(s) for s in groups.values())
-    if total_all > total_shown:
-        elements.append({"tag": "markdown", "content": f"_共 {total_all} 只，展示前 {total_shown} 只。使用 `/add TICKER-名称` 添加更多_"})
+    # 每个分组一个按钮
+    buttons = []
+    for group_name in groups.keys():
+        buttons.append({
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": f"📁 {group_name}"},
+            "type": "primary",
+            "value": {"action": "view_group", "group": group_name},
+        })
+    elements.append({"tag": "action", "actions": buttons})
 
     return {
         "config": {"wide_screen_mode": True},
         "header": {"title": {"tag": "plain_text", "content": "📈 全部股票"}},
+        "elements": elements,
+    }
+
+
+def build_group_stocks_card(group_name: str) -> dict:
+    """构建指定分组的股票列表卡片（二级导航，带添加+返回按钮）"""
+    from longbridge_sync import _get_longbridge_context
+
+    try:
+        quote_ctx, _ = _get_longbridge_context()
+        stocks = []
+        for group in quote_ctx.watchlist():
+            if group.name == group_name:
+                stocks = [(sec.symbol, sec.name) for sec in group.securities]
+                break
+    except Exception as e:
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {"title": {"tag": "plain_text", "content": f"📁 {group_name}"}},
+            "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": f"获取失败: {e}"}}],
+        }
+
+    if not stocks:
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {"title": {"tag": "plain_text", "content": f"📁 {group_name}"}},
+            "elements": [
+                {"tag": "div", "text": {"tag": "lark_md", "content": "该分组为空"}},
+                {"tag": "action", "actions": [
+                    {"tag": "button", "text": {"tag": "plain_text", "content": "⬅ 返回列表"},
+                     "type": "default", "value": {"action": "back_to_groups"}},
+                ]},
+            ],
+        }
+
+    # 股票文本列表
+    lines = []
+    for ticker, name in stocks:
+        lines.append(f"**{ticker}**-{name}")
+    elements = [
+        {"tag": "markdown", "content": f"**{group_name}**（{len(stocks)} 只）\n" + "\n".join(lines)},
+    ]
+
+    # 添加按钮（每行 5 个，分批）
+    for i in range(0, len(stocks), 5):
+        chunk = stocks[i:i + 5]
+        buttons = []
+        for ticker, name in chunk:
+            buttons.append({
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": f"➕ {ticker}"},
+                "type": "primary",
+                "value": {"action": "add_to_monitor", "ticker": ticker, "name": name, "group": group_name},
+            })
+        elements.append({"tag": "action", "actions": buttons})
+
+    # 返回按钮
+    elements.append({"tag": "action", "actions": [
+        {"tag": "button", "text": {"tag": "plain_text", "content": "⬅ 返回列表"},
+         "type": "default", "value": {"action": "back_to_groups"}},
+    ]})
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"title": {"tag": "plain_text", "content": f"📁 {group_name}"}},
         "elements": elements,
     }
 
@@ -463,6 +508,7 @@ def handle_card_action(data) -> "P2CardActionTriggerResponse":
     elif action_type == "add_to_monitor":
         ticker = value.get("ticker", "")
         name = value.get("name", "")
+        group_name = value.get("group", "")
 
         # 添加到长桥"量比监控"分组
         success = False
@@ -492,6 +538,22 @@ def handle_card_action(data) -> "P2CardActionTriggerResponse":
         resp.toast = CallBackToast()
         resp.toast.type = "success" if success else "error"
         resp.toast.content = f"已添加 {ticker}-{name} 到量比监控" if success else f"添加失败: {ticker}"
+        # 添加后留在当前分组页面
+        resp.card = CallBackCard()
+        resp.card.type = "raw"
+        resp.card.data = build_group_stocks_card(group_name) if group_name else build_allstock_card()
+        return resp
+
+    elif action_type == "view_group":
+        group_name = value.get("group", "")
+        resp = P2CardActionTriggerResponse()
+        resp.card = CallBackCard()
+        resp.card.type = "raw"
+        resp.card.data = build_group_stocks_card(group_name)
+        return resp
+
+    elif action_type == "back_to_groups":
+        resp = P2CardActionTriggerResponse()
         resp.card = CallBackCard()
         resp.card.type = "raw"
         resp.card.data = build_allstock_card()
