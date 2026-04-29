@@ -177,36 +177,23 @@ def build_scan_card() -> dict:
 
     sorted_results = sorted(results, key=lambda x: x.get("ratio", 0), reverse=True)
 
-    lines = [f"**扫描时间:** {datetime.now().strftime('%H:%M:%S')}", ""]
-
     us = [r for r in sorted_results if r["ticker"].endswith(".US")]
     hk = [r for r in sorted_results if r["ticker"].endswith(".HK")]
     cn = [r for r in sorted_results if r["ticker"].endswith((".SH", ".SZ"))]
 
+    elements = [
+        {"tag": "markdown", "content": f"**扫描时间:** {datetime.now().strftime('%H:%M:%S')}"},
+    ]
+
     for label, tickers in [("🇺🇸 美股", us), ("🇭🇰 港股", hk), ("🇨🇳 A股", cn)]:
         if not tickers:
             continue
-        lines.append(f"**{label}**")
-        lines.append("| 标的 | 价格 | 涨跌 | 量比 | 状态 |")
-        lines.append("| --- | ---: | ---: | ---: | --- |")
-        for r in tickers:
-            name = r.get("name", r["ticker"])
-            ticker = r["ticker"]
-            ratio = r.get("ratio", 0)
-            change = r.get("change_pct", 0)
-            price = r.get("price", 0)
-            direction = "↑" if change > 0 else "↓"
-            ratio_display = format_ratio_display(ratio)
-            emoji = "🔥" if ratio > 2.0 else ("⚠️" if ratio < 0.8 else "✅")
-            lines.append(f"| {ticker}-{name} | ${price} | {direction}{abs(change):.1f}% | {ratio:.1f} | {emoji} {ratio_display} |")
-        lines.append("")
+        elements.extend(build_market_table(label, tickers))
 
     return {
         "config": {"wide_screen_mode": True},
         "header": {"title": {"tag": "plain_text", "content": "📊 量比扫描"}},
-        "elements": [
-            {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}}
-        ]
+        "elements": elements,
     }
 
 
@@ -218,38 +205,76 @@ def build_signals_card() -> dict:
     today = datetime.now().strftime("%Y-%m-%d")
 
     if not db_path.exists():
-        content = "数据库不存在"
-    else:
-        try:
-            with sqlite3.connect(db_path, timeout=10) as conn:
-                rows = conn.execute("""
-                    SELECT ticker, name, signal_type, ratio, price, change_pct, source, timestamp
-                    FROM signals WHERE timestamp LIKE ? ORDER BY timestamp
-                """, (f"{today}%",)).fetchall()
-        except sqlite3.Error:
-            rows = []
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {"title": {"tag": "plain_text", "content": "📈 今日信号"}},
+            "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "数据库不存在"}}],
+        }
 
-        if not rows:
-            content = "今日无触发信号"
-        else:
-            lines = [f"**{today}** 共 {len(rows)} 个信号", ""]
-            lines.append("| 时间 | 标的 | 涨跌 | 量比 | 信号 | 来源 |")
-            lines.append("| ---: | --- | ---: | ---: | --- | --- |")
-            for ticker, name, sig_type, ratio, price, change, source, ts in rows:
-                name = name or ticker
-                direction = "↑" if change > 0 else "↓"
-                dt = datetime.fromisoformat(ts).strftime("%H:%M")
-                ratio_display = format_ratio_display(ratio or 0)
-                src = "日内" if source == "intraday" else "5日"
-                lines.append(f"| {dt} | {ticker}-{name} | {direction}{abs(change):.1f}% | {ratio_display} | {sig_type} | {src} |")
-            content = "\n".join(lines)
+    try:
+        with sqlite3.connect(db_path, timeout=10) as conn:
+            rows = conn.execute("""
+                SELECT ticker, name, signal_type, ratio, price, change_pct, source, timestamp
+                FROM signals WHERE timestamp LIKE ? ORDER BY timestamp
+            """, (f"{today}%",)).fetchall()
+    except sqlite3.Error:
+        rows = []
+
+    if not rows:
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {"title": {"tag": "plain_text", "content": "📈 今日信号"}},
+            "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "今日无触发信号"}}],
+        }
+
+    elements = [
+        {"tag": "markdown", "content": f"**{today}** 共 {len(rows)} 个信号"},
+    ]
+
+    columns = [
+        {"name": "time", "display_name": "时间", "width": "auto", "horizontal_align": "right", "data_type": "text"},
+        {"name": "ticker", "display_name": "标的", "width": "auto", "horizontal_align": "left", "data_type": "text"},
+        {"name": "change", "display_name": "涨跌", "width": "auto", "horizontal_align": "right", "data_type": "text"},
+        {"name": "ratio", "display_name": "量比", "width": "auto", "horizontal_align": "right", "data_type": "text"},
+        {"name": "signal", "display_name": "信号", "width": "auto", "horizontal_align": "left", "data_type": "text"},
+        {"name": "source", "display_name": "来源", "width": "auto", "horizontal_align": "center", "data_type": "text"},
+    ]
+
+    table_rows = []
+    for ticker, name, sig_type, ratio, price, change, source, ts in rows:
+        name = name or ticker
+        direction = "↑" if change > 0 else "↓"
+        dt = datetime.fromisoformat(ts).strftime("%H:%M")
+        ratio_display = format_ratio_display(ratio or 0)
+        src = "日内" if source == "intraday" else "5日"
+        table_rows.append({
+            "time": dt,
+            "ticker": f"{ticker}-{name}",
+            "change": f"{direction}{abs(change):.1f}%",
+            "ratio": ratio_display,
+            "signal": sig_type or "",
+            "source": src,
+        })
+
+    elements.append({
+        "tag": "table",
+        "page_size": len(table_rows),
+        "row_height": "low",
+        "header_style": {
+            "text_align": "left",
+            "text_size": "normal",
+            "background_style": "grey",
+            "bold": True,
+            "lines": 1,
+        },
+        "columns": columns,
+        "rows": table_rows,
+    })
 
     return {
         "config": {"wide_screen_mode": True},
         "header": {"title": {"tag": "plain_text", "content": "📈 今日信号"}},
-        "elements": [
-            {"tag": "div", "text": {"tag": "lark_md", "content": content}}
-        ]
+        "elements": elements,
     }
 
 
