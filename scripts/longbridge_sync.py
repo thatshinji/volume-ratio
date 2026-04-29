@@ -142,6 +142,49 @@ def remove_from_watchlist(ticker: str, group_name: str = "量比监控") -> bool
         return False
 
 
+def add_to_monitor(ticker: str, name: str = "", group_name: str = "量比监控") -> bool:
+    """将标的添加到长桥自选股分组"""
+    try:
+        quote_ctx, _ = _get_longbridge_context()
+        for group in quote_ctx.watchlist():
+            if group.name == group_name:
+                from longbridge.openapi import SecuritiesUpdateMode
+                quote_ctx.update_watchlist_group(
+                    id=group.id,
+                    securities=[ticker],
+                    mode=SecuritiesUpdateMode.Add,
+                )
+                print(f"[sync] 已添加到「{group_name}」: {ticker}")
+                return True
+        print(f"[sync] 未找到分组: {group_name}")
+        return False
+    except Exception as e:
+        print(f"[sync] 添加失败: {e}")
+        return False
+
+
+def fetch_other_groups(exclude_names: list = None) -> dict:
+    """
+    获取除指定分组外的所有自选股分组
+    返回: {"分组名": [(ticker, name), ...], ...}
+    """
+    if exclude_names is None:
+        exclude_names = ["量比监控"]
+
+    result = {}
+    try:
+        quote_ctx, _ = _get_longbridge_context()
+        for group in quote_ctx.watchlist():
+            if group.name in exclude_names:
+                continue
+            stocks = [(sec.symbol, sec.name) for sec in group.securities]
+            if stocks:
+                result[group.name] = stocks
+    except Exception as e:
+        print(f"[sync] 获取分组失败: {e}")
+    return result
+
+
 def run_sync(groups: list = None) -> dict:
     """
     执行完整同步流程
