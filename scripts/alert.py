@@ -60,6 +60,8 @@ PROMPT_BRIEF_TEMPLATE = """你是量比分析专家。以下是当前持仓组�
 
 def detect_signals(results: List[dict]) -> List[dict]:
     """检测触发的信号（historical + intraday 双路径）"""
+    from core.market import get_market, is_market_trading
+
     alerts = []
     config = load_config()
     params = config.get("params", {})
@@ -67,6 +69,11 @@ def detect_signals(results: List[dict]) -> List[dict]:
     shrink_threshold = params.get("shrink_threshold", 0.6)
 
     for r in results:
+        # 跳过闭市的市场
+        ticker = r.get("ticker", "")
+        market = get_market(ticker)
+        if not is_market_trading(market):
+            continue
         ticker = r.get("ticker", "")
         name = r.get("name", ticker)
         ratio = r.get("ratio", 0)
@@ -440,10 +447,17 @@ def send_brief_report():
     生成持仓组合量比概况，调用 LLM 做整体解读
     """
     from compute import compute_all
+    from core.market import get_market, is_market_trading
 
     results = compute_all()
     if not results:
         print("[alert] 简报：无数据")
+        return
+
+    # 只保留正在交易的市场
+    results = [r for r in results if is_market_trading(get_market(r["ticker"]))]
+    if not results:
+        print("[alert] 简报：当前无开盘市场")
         return
 
     # 按量比排序

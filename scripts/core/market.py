@@ -3,7 +3,46 @@
 所有脚本通过 `from core.market import get_market, get_all_tickers` 使用
 """
 
+from datetime import datetime
+
 from .config import parse_ticker
+
+
+def is_market_trading(market: str) -> bool:
+    """判断市场当前是否在交易时间内"""
+    now = datetime.now()
+    weekday = now.weekday()  # 0=周一, 6=周日
+
+    # 周末不交易
+    if weekday >= 5:
+        return False
+
+    if market == "CN":
+        # A股: 9:30-11:30, 13:00-15:00 (北京时间)
+        t = now.hour * 100 + now.minute
+        return (930 <= t <= 1130) or (1300 <= t <= 1500)
+
+    elif market == "HK":
+        # 港股: 9:30-12:00, 13:00-16:00 (香港时间，同北京时间)
+        t = now.hour * 100 + now.minute
+        return (930 <= t <= 1200) or (1300 <= t <= 1600)
+
+    elif market == "US":
+        # 美股: 9:30-16:00 ET (夏令时 UTC-4, 冬令时 UTC-5)
+        # 北京时间: 夏令时 21:30-次日4:00, 冬令时 22:30-次日5:00
+        # 简化处理: 用 pytz 转换
+        try:
+            import pytz
+            et = pytz.timezone("US/Eastern")
+            et_now = now.astimezone(et) if now.tzinfo else datetime.now(et)
+            t = et_now.hour * 100 + et_now.minute
+            return 930 <= t <= 1600
+        except ImportError:
+            # 无 pytz 时，粗略判断（北京时间 21:30-次日5:00）
+            t = now.hour * 100 + now.minute
+            return (2130 <= t <= 2359) or (0 <= t <= 500)
+
+    return False
 
 
 def get_market(ticker: str) -> str:
