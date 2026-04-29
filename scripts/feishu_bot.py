@@ -67,8 +67,10 @@ def send_text(client: lark.Client, chat_id: str, text: str):
         .build()
 
     resp = client.im.v1.message.create(req)
-    if not resp.success():
-        print(f"[bot] 发送失败: {resp.code} {resp.msg}", flush=True)
+    if resp.success():
+        print(f"[bot] 文本发送成功 -> {chat_id}", flush=True)
+    else:
+        print(f"[bot] 文本发送失败: code={resp.code} msg={resp.msg}", flush=True)
 
 
 def send_card(client: lark.Client, chat_id: str, card: dict):
@@ -84,8 +86,10 @@ def send_card(client: lark.Client, chat_id: str, card: dict):
         .build()
 
     resp = client.im.v1.message.create(req)
-    if not resp.success():
-        print(f"[bot] 卡片发送失败: {resp.code} {resp.msg}", flush=True)
+    if resp.success():
+        print(f"[bot] 卡片发送成功 -> {chat_id}", flush=True)
+    else:
+        print(f"[bot] 卡片发送失败: code={resp.code} msg={resp.msg}", flush=True)
 
 
 def build_status_card() -> dict:
@@ -389,6 +393,7 @@ def main():
                 # 移除 @机器人 的提及
                 if text.startswith("@"):
                     text = text.split(" ", 1)[-1] if " " in text else text
+                print(f"[bot] 收到消息: {text}", flush=True)
                 handle_command(api_client, chat_id, text)
         except Exception as e:
             print(f"[bot] 消息处理异常: {e}", flush=True)
