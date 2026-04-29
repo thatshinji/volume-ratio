@@ -77,7 +77,7 @@ def switch_llm(profile_name: str) -> bool:
         "model": profile.get("model", ""),
         "base_url": profile.get("base_url", ""),
         "api_key": profile.get("api_key", ""),
-        "max_tokens": profile.get("max_tokens", 500),
+        "max_tokens": profile.get("max_tokens", 800),
         "temperature": profile.get("temperature", 0.3),
     }
 
@@ -112,7 +112,7 @@ def call_llm(prompt: str, model: str = None) -> Optional[str]:
     payload = {
         "model": model_name,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": cfg.get("max_tokens", 500),
+        "max_tokens": cfg.get("max_tokens", 800),
         "temperature": cfg.get("temperature", 0.3)
     }
 
