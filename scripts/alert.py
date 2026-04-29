@@ -68,6 +68,7 @@ def detect_signals(results: List[dict]) -> List[dict]:
 
     for r in results:
         ticker = r.get("ticker", "")
+        name = r.get("name", ticker)
         ratio = r.get("ratio", 0)
         change_pct = r.get("change_pct", 0)
         signal = r.get("signal", "")
@@ -75,9 +76,9 @@ def detect_signals(results: List[dict]) -> List[dict]:
 
         # === Historical 路径（5日历史量比）===
         triggered = []
-        for name, rule in SIGNAL_RULES.items():
+        for sig_name, rule in SIGNAL_RULES.items():
             if rule(ratio, change_pct):
-                triggered.append(name)
+                triggered.append(sig_name)
 
         if signal != "数据不足":
             if ratio > alert_threshold:
@@ -88,6 +89,7 @@ def detect_signals(results: List[dict]) -> List[dict]:
         if triggered or signal_detail:
             alerts.append({
                 "ticker": ticker,
+                "name": name,
                 "ratio": ratio,
                 "change_pct": change_pct,
                 "price": r.get("price", 0),
@@ -107,6 +109,7 @@ def detect_signals(results: List[dict]) -> List[dict]:
         if signal_intraday == "放量止跌":
             alerts.append({
                 "ticker": ticker,
+                "name": name,
                 "ratio": ratio_intraday,
                 "change_pct": change_pct,
                 "price": r.get("price", 0),
@@ -118,6 +121,7 @@ def detect_signals(results: List[dict]) -> List[dict]:
         elif signal_intraday == "放量" and ratio_intraday > 1.5:
             alerts.append({
                 "ticker": ticker,
+                "name": name,
                 "ratio": ratio_intraday,
                 "change_pct": change_pct,
                 "price": r.get("price", 0),
@@ -130,8 +134,8 @@ def detect_signals(results: List[dict]) -> List[dict]:
     return alerts
 
 
-def format_alert_message(alert: dict, analysis: Optional[str] = None) -> str:
-    """格式化飞书消息（可选 LLM 分析）"""
+def format_alert_card(alert: dict, analysis: Optional[str] = None) -> dict:
+    """格式化飞书卡片消息"""
     ticker = alert["ticker"]
     name = alert.get("name", ticker)
     ratio = alert["ratio"]
@@ -140,25 +144,46 @@ def format_alert_message(alert: dict, analysis: Optional[str] = None) -> str:
     signals = ", ".join(alert["triggered_signals"]) or alert["signal_detail"] or alert["signal"]
     source = alert.get("source", "historical")
 
-    emoji = "🔥" if ratio > 2.0 else "⚠️"
     direction = "↑" if change > 0 else "↓"
     ratio_display = format_ratio_display(ratio)
+    type_label = "日内" if source == "intraday" else "5日"
 
-    type_label = "【日内】" if source == "intraday" else "【5日】"
+    # 标题
+    if ratio > 5.0:
+        header_icon = "🔥🔥"
+    elif ratio > 2.0:
+        header_icon = "🔥"
+    elif ratio < 0.6:
+        header_icon = "⚠️"
+    else:
+        header_icon = "📊"
 
-    msg = f"""{emoji} {type_label}{ticker} {name}
-当前价: {price} ({direction}{abs(change):.2f}%)
-量比: {ratio} {ratio_display} ({signals})
-时间: {datetime.now().strftime('%H:%M:%S')}
-"""
+    title = f"{header_icon} 【{type_label}】{ticker}-{name}"
+
+    # 内容
+    lines = [
+        f"**当前价:** ${price} ({direction}{abs(change):.2f}%)",
+        f"**量比:** {ratio:.2f} {ratio_display}",
+        f"**信号:** {signals}",
+        f"**时间:** {datetime.now().strftime('%H:%M:%S')}",
+    ]
     if analysis:
-        msg += f"\n[LLM分析] {analysis}"
+        lines.append("")
+        lines.append(f"**LLM分析:** {analysis}")
 
-    return msg
+    content = "\n".join(lines)
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"title": {"tag": "plain_text", "content": title}},
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md", "content": content}}
+        ]
+    }
 
 
-def send_feishu(message: str, chat_id: str = "") -> bool:
-    """通过飞书机器人发送消息"""
+def send_feishu_card(card: dict, chat_id: str = "") -> bool:
+    """通过飞书机器人发送卡片消息"""
     import lark_oapi as lark
     from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
 
@@ -184,25 +209,25 @@ def send_feishu(message: str, chat_id: str = "") -> bool:
             .log_level(lark.LogLevel.WARNING) \
             .build()
 
-        content = json.dumps({"text": message})
+        content = json.dumps(card)
         req = CreateMessageRequest.builder() \
             .receive_id_type("chat_id") \
             .request_body(CreateMessageRequestBody.builder()
                 .receive_id(chat_id)
-                .msg_type("text")
+                .msg_type("interactive")
                 .content(content)
                 .build()) \
             .build()
 
         resp = client.im.v1.message.create(req)
         if resp.success():
-            print(f"[alert] 飞书推送成功")
+            print(f"[alert] 飞书卡片推送成功")
             return True
         else:
-            print(f"[alert] 飞书推送失败: code={resp.code} msg={resp.msg}")
+            print(f"[alert] 飞书卡片推送失败: code={resp.code} msg={resp.msg}")
             return False
     except Exception as e:
-        print(f"[alert] 飞书推送异常: {e}")
+        print(f"[alert] 飞书卡片推送异常: {e}")
         return False
 
 
@@ -394,9 +419,15 @@ def scan_and_alert():
         )
 
         # 推送
-        message = format_alert_message(alert, analysis)
-        print(message)
-        send_feishu(message)
+        card = format_alert_card(alert, analysis)
+        # 同时打印文本日志
+        ticker = alert["ticker"]
+        name = alert.get("name", ticker)
+        ratio = alert["ratio"]
+        change = alert["change_pct"]
+        direction = "↑" if change > 0 else "↓"
+        print(f"[alert] {ticker}-{name} {direction}{abs(change):.2f}% 量比{ratio:.2f} {alert.get('source','')}")
+        send_feishu_card(card)
         pushed_count += 1
         print("---")
 
@@ -419,8 +450,7 @@ def send_brief_report():
     sorted_results = sorted(results, key=lambda x: x.get("ratio", 0), reverse=True)
 
     # 生成分市场简报
-    lines = [f"📊 量比简报 {datetime.now().strftime('%H:%M')}"]
-    lines.append("")
+    lines = []
 
     us_tickers = [r for r in sorted_results if r["ticker"].endswith(".US")]
     hk_tickers = [r for r in sorted_results if r["ticker"].endswith(".HK")]
@@ -429,12 +459,16 @@ def send_brief_report():
     for label, tickers in [("🇺🇸 美股", us_tickers), ("🇭🇰 港股", hk_tickers), ("🇨🇳 A股", cn_tickers)]:
         if not tickers:
             continue
-        lines.append(f"{label}:")
+        lines.append(f"**{label}:**")
         for r in tickers:
             ratio = r.get("ratio", 0)
             change = r.get("change_pct", 0)
             name = r.get("name", r["ticker"])
-            lines.append(f"  {format_ticker_line(r['ticker'], name, change, ratio)}")
+            ticker = r["ticker"]
+            direction = "↑" if change > 0 else "↓"
+            ratio_display = format_ratio_display(ratio)
+            emoji = "🔥" if ratio > 2.0 else ("⚠️" if ratio < 0.8 else "✅")
+            lines.append(f"{emoji} `{ticker}-{name}` {direction}{abs(change):.1f}% {ratio:.1f} {ratio_display}")
         lines.append("")
 
     brief_text = "\n".join(lines)
@@ -444,12 +478,21 @@ def send_brief_report():
     prompt = PROMPT_BRIEF_TEMPLATE.format(brief_text=brief_text)
     analysis = get_llm_analysis(prompt)
 
-    message = brief_text
     if analysis:
-        message += f"\n[LLM解读] {analysis}"
+        brief_text += f"\n**LLM解读:** {analysis}"
 
-    print(message)
-    send_feishu(message)
+    # 构建卡片
+    now = datetime.now().strftime('%H:%M')
+    card = {
+        "config": {"wide_screen_mode": True},
+        "header": {"title": {"tag": "plain_text", "content": f"📋 量比简报 {now}"}},
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md", "content": brief_text}}
+        ]
+    }
+
+    print(f"[alert] 简报发送: {len(sorted_results)} 个标的")
+    send_feishu_card(card)
 
 
 if __name__ == "__main__":
