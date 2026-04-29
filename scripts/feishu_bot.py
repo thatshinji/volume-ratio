@@ -259,24 +259,96 @@ def build_brief_card() -> dict:
     }
 
 
-def build_start_card(output: str) -> dict:
+def _check_component_status() -> dict:
+    """检查各组件运行状态"""
+    import sqlite3
+
+    status = {}
+
+    # WebSocket 采集
+    ws_pid_file = ROOT / "logs" / "ws_collect.pid"
+    if ws_pid_file.exists():
+        try:
+            pid = int(ws_pid_file.read_text().strip())
+            os.kill(pid, 0)
+            status["ws"] = ("✅", f"运行中 (PID {pid})")
+        except (ValueError, OSError):
+            status["ws"] = ("❌", "PID 文件存在但进程不存活")
+    else:
+        status["ws"] = ("❌", "未运行")
+
+    # 飞书机器人
+    bot_pid_file = ROOT / "logs" / "feishu_bot.pid"
+    if bot_pid_file.exists():
+        try:
+            pid = int(bot_pid_file.read_text().strip())
+            os.kill(pid, 0)
+            status["bot"] = ("✅", f"运行中 (PID {pid})")
+        except (ValueError, OSError):
+            status["bot"] = ("❌", "PID 文件存在但进程不存活")
+    else:
+        status["bot"] = ("❌", "未运行")
+
+    # Cron 任务
+    try:
+        result = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=10)
+        cron_lines = [l for l in result.stdout.split("\n") if "volume-ratio" in l]
+        if cron_lines:
+            status["cron"] = ("✅", f"{len(cron_lines)} 个任务")
+        else:
+            status["cron"] = ("❌", "无任务")
+    except Exception:
+        status["cron"] = ("⚠️", "检查失败")
+
+    # 数据库
+    db_path = ROOT / "data" / "ratios.db"
+    if db_path.exists():
+        try:
+            with sqlite3.connect(str(db_path), timeout=5) as conn:
+                count = conn.execute("SELECT COUNT(*) FROM volume_ratios").fetchone()[0]
+                status["db"] = ("✅", f"{count:,} 条记录")
+        except sqlite3.Error:
+            status["db"] = ("⚠️", "读取失败")
+    else:
+        status["db"] = ("❌", "数据库不存在")
+
+    return status
+
+
+def build_start_card() -> dict:
     """构建启动结果卡片"""
+    status = _check_component_status()
+    lines = []
+    for key, label in [("ws", "WebSocket 采集"), ("bot", "飞书机器人"), ("cron", "Cron 任务"), ("db", "数据库")]:
+        icon, detail = status.get(key, ("❓", "未知"))
+        lines.append(f"{icon} **{label}**: {detail}")
+    content = "\n".join(lines)
+
     return {
         "config": {"wide_screen_mode": True},
         "header": {"title": {"tag": "plain_text", "content": "🚀 启动量比系统"}},
         "elements": [
-            {"tag": "div", "text": {"tag": "lark_md", "content": f"```\n{output}\n```"}}
+            {"tag": "div", "text": {"tag": "lark_md", "content": content}}
         ]
     }
 
 
-def build_stop_card(output: str) -> dict:
+def build_stop_card() -> dict:
     """构建关停结果卡片"""
+    status = _check_component_status()
+    lines = ["关停指令已执行，以下为当前状态：", ""]
+    for key, label in [("ws", "WebSocket 采集"), ("bot", "飞书机器人"), ("cron", "Cron 任务"), ("db", "数据库")]:
+        icon, detail = status.get(key, ("❓", "未知"))
+        lines.append(f"{icon} **{label}**: {detail}")
+    lines.append("")
+    lines.append("_机器人将在数秒后停止，如需重启请在终端执行 `python3 scripts/start_all.py`_")
+    content = "\n".join(lines)
+
     return {
         "config": {"wide_screen_mode": True},
         "header": {"title": {"tag": "plain_text", "content": "🛑 关停量比系统"}},
         "elements": [
-            {"tag": "div", "text": {"tag": "lark_md", "content": f"```\n{output}\n```"}}
+            {"tag": "div", "text": {"tag": "lark_md", "content": content}}
         ]
     }
 
@@ -287,16 +359,12 @@ def handle_command(client: lark.Client, chat_id: str, text: str):
     print(f"[bot] 收到指令: {text}", flush=True)
 
     if text == "/start":
-        send_text(client, chat_id, "正在启动量比系统...")
         try:
-            result = subprocess.run(
+            subprocess.run(
                 [sys.executable, str(ROOT / "scripts" / "start_all.py")],
                 capture_output=True, text=True, timeout=60
             )
-            output = result.stdout + result.stderr
-            if len(output) > 3000:
-                output = output[:3000] + "\n...(截断)"
-            card = build_start_card(output.strip() or "启动完成（无输出）")
+            card = build_start_card()
             send_card(client, chat_id, card)
         except subprocess.TimeoutExpired:
             send_text(client, chat_id, "启动超时（>60秒），请检查日志")
@@ -304,17 +372,16 @@ def handle_command(client: lark.Client, chat_id: str, text: str):
             send_text(client, chat_id, f"启动失败: {e}")
 
     elif text == "/stop":
-        send_text(client, chat_id, "正在关停量比系统...")
         try:
-            result = subprocess.run(
+            # 先发送结果卡片，再执行关停（因为关停会杀掉机器人自身）
+            card = build_stop_card()
+            send_card(client, chat_id, card)
+            import time
+            time.sleep(1)  # 等待卡片发送完成
+            subprocess.run(
                 [sys.executable, str(ROOT / "scripts" / "stop_all.py")],
                 capture_output=True, text=True, timeout=60
             )
-            output = result.stdout + result.stderr
-            if len(output) > 3000:
-                output = output[:3000] + "\n...(截断)"
-            card = build_stop_card(output.strip() or "关停完成（无输出）")
-            send_card(client, chat_id, card)
         except subprocess.TimeoutExpired:
             send_text(client, chat_id, "关停超时（>60秒），请检查日志")
         except Exception as e:
