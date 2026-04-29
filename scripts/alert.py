@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 信号检测 + 飞书推送
-cron 每1分钟扫描，触发信号时通过 webhook 推送到飞书
+cron 每1分钟扫描，触发信号时通过飞书机器人推送
 """
 
 import json
@@ -11,8 +11,6 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
-
-import requests
 
 ROOT = Path(__file__).parent.parent
 
@@ -159,26 +157,51 @@ def format_alert_message(alert: dict, analysis: Optional[str] = None) -> str:
     return msg
 
 
-def send_feishu(message: str, webhook_url: str) -> bool:
-    """发送飞书消息"""
-    if not webhook_url:
-        print("[alert] 飞书 webhook 未配置，跳过推送")
+def send_feishu(message: str, chat_id: str = "") -> bool:
+    """通过飞书机器人发送消息"""
+    import lark_oapi as lark
+    from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
+
+    config = load_config()
+    feishu = config.get("feishu", {})
+    app_id = feishu.get("app_id", "")
+    app_secret = feishu.get("app_secret", "")
+
+    if not app_id or not app_secret:
+        print("[alert] 飞书 app_id/app_secret 未配置，跳过推送")
         return False
 
-    payload = {
-        "msg_type": "text",
-        "content": {"text": message}
-    }
+    if not chat_id:
+        chat_id = feishu.get("chat_id", "")
+    if not chat_id:
+        print("[alert] 飞书 chat_id 未配置，跳过推送")
+        return False
 
     try:
-        resp = requests.post(webhook_url, json=payload, timeout=10)
-        if resp.status_code == 200:
+        client = lark.Client.builder() \
+            .app_id(app_id) \
+            .app_secret(app_secret) \
+            .log_level(lark.LogLevel.WARNING) \
+            .build()
+
+        content = json.dumps({"text": message})
+        req = CreateMessageRequest.builder() \
+            .receive_id_type("chat_id") \
+            .request_body(CreateMessageRequestBody.builder()
+                .receive_id(chat_id)
+                .msg_type("text")
+                .content(content)
+                .build()) \
+            .build()
+
+        resp = client.im.v1.message.create(req)
+        if resp.success():
             print(f"[alert] 飞书推送成功")
             return True
         else:
-            print(f"[alert] 飞书推送失败: {resp.status_code}")
+            print(f"[alert] 飞书推送失败: code={resp.code} msg={resp.msg}")
             return False
-    except (requests.ConnectionError, requests.Timeout) as e:
+    except Exception as e:
         print(f"[alert] 飞书推送异常: {e}")
         return False
 
@@ -307,10 +330,6 @@ def scan_and_alert():
     """扫描并发送告警，触发信号时调用 LLM 分析（带去重状态机）"""
     from compute import compute_all, save_signal
 
-    config = load_config()
-    feishu_config = config.get("feishu", {})
-    webhook_url = feishu_config.get("webhook_url", "")
-
     results = compute_all()
     alerts = detect_signals(results)
 
@@ -377,8 +396,7 @@ def scan_and_alert():
         # 推送
         message = format_alert_message(alert, analysis)
         print(message)
-        if webhook_url:
-            send_feishu(message, webhook_url)
+        send_feishu(message)
         pushed_count += 1
         print("---")
 
@@ -391,10 +409,6 @@ def send_brief_report():
     生成持仓组合量比概况，调用 LLM 做整体解读
     """
     from compute import compute_all
-
-    config = load_config()
-    feishu_config = config.get("feishu", {})
-    webhook_url = feishu_config.get("webhook_url", "")
 
     results = compute_all()
     if not results:
@@ -435,8 +449,7 @@ def send_brief_report():
         message += f"\n[LLM解读] {analysis}"
 
     print(message)
-    if webhook_url:
-        send_feishu(message, webhook_url)
+    send_feishu(message)
 
 
 if __name__ == "__main__":

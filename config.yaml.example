@@ -67,5 +67,6 @@ llm_profiles:
 feishu:
   app_id: "YOUR_APP_ID"
   app_secret: "YOUR_APP_SECRET"
+  chat_id: "YOUR_CHAT_ID"  # 机器人会话 chat_id，从机器人日志中获取
   # webhook_url 保留作为备用（自建应用模式下可选）
   # webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/YOUR_WEBHOOK_TOKEN"
