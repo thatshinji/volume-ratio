@@ -1,6 +1,6 @@
 # 跨市场量比监控系统
 
-实时监控 US/HK/CN 三大市场股票的成交量异动，结合 LLM 智能分析，信号触发即时推送飞书。支持飞书机器人交互指令，可从飞书直接管理监控标的、查看信号历史。
+实时监控 US/HK/CN 三大市场股票的成交量异动，结合 LLM 智能分析，信号触发即时推送飞书卡片。支持飞书机器人交互指令，可通过卡片按钮直接管理监控标的、查看信号历史、同步长桥持仓。
 
 ---
 
@@ -12,7 +12,8 @@
 - **多市场覆盖**：美股(US)、港股(HK)、A股(CN) 三大市场
 - **智能信号检测**：放量突破、放量下跌、缩量止跌、尾盘放量等
 - **LLM 多模型切换**：一键切换 MiniMax / Xiaomi 等模型，自动分析量比异常原因
-- **飞书机器人**：WebSocket 长连接，支持交互指令（/status /scan /signals /brief /add /remove /mute）
+- **飞书机器人**：WebSocket 长连接，支持交互指令（/status /scan /signals /brief /watchlist /allstock /sync /start /stop）
+- **交互式卡片**：关注列表可删除、全部股票可添加、长桥持仓自动同步
 - **信号去重**：状态机模型，状态变化时推送，状态持续时静默，状态升级时再推送
 - **JSONL 存储**：每日每标的一个 JSONL 文件，6万+文件/天 → 11文件/天
 - **中文名标识**：标的显示中文名（如 `CLF.US 克利夫兰`），量比用符号+中文双标识
@@ -120,8 +121,9 @@ volume-ratio/
 │   ├── compute.py           # 量比计算引擎
 │   ├── alert.py             # 信号检测 + 去重 + 飞书推送
 │   ├── cli.py               # CLI 命令行入口
-│   ├── feishu_bot.py        # 飞书机器人（WebSocket 长连接）
+│   ├── feishu_bot.py        # 飞书机器人（WebSocket 长连接 + 卡片回调）
 │   ├── feishu_bot_launcher.py  # 飞书机器人守护进程（cron）
+│   ├── longbridge_sync.py   # 长桥持仓+自选股同步
 │   ├── bot_start.py         # 一键启动飞书机器人
 │   ├── bot_stop.py          # 一键停止飞书机器人
 │   ├── cleanup.py           # 数据清理脚本
@@ -181,10 +183,13 @@ volume-ratio/
 |:--|:--|
 | `/start` | 一键启动量比系统（cron + WebSocket + 飞书机器人） |
 | `/stop` | 一键关停量比系统 |
-| `/status` | 系统健康状态 |
+| `/status` | 系统健康状态（含今日 LLM 调用次数） |
 | `/scan` | 当前量比快照（按量比排序） |
 | `/signals` | 今日触发信号列表 |
-| `/brief` | 立即发送量比简报 |
+| `/brief` | 立即发送量比简报（原生表格） |
+| `/watchlist` | 关注列表（卡片按钮一键删除，同步长桥） |
+| `/allstock` | 全部股票（二级导航，一键添加到量比监控） |
+| `/sync` | 同步长桥持仓+自选股到 watchlist |
 | `/add CLF.US-克利夫兰` | 添加监控标的 |
 | `/remove CLF.US` | 移除监控标的 |
 | `/mute CLF.US 2h` | 静默指定标的 |
@@ -324,8 +329,9 @@ data/snapshots/US/CLF_US_20260429.jsonl   # 一行一条快照
 
 - `volume_ratios` — 量比实时记录
 - `daily_summary` — 每日汇总
-- `signals` — 信号记录（新增）
-- `signal_states` — 信号去重状态（新增）
+- `signals` — 信号记录
+- `signal_states` — 信号去重状态
+- `llm_calls` — LLM API 调用记录（v3.1 新增）
 
 ### 8.3 数据清理
 
@@ -409,6 +415,7 @@ dependencies = [
 | v1.0 | 2026-04-28 | 初始实现方案 |
 | v2.0 | 2026-04-29 | 切换 WebSocket 推送模式，新增日内滚动量比，LLM 多模型切换 |
 | v3.0 | 2026-04-29 | 迭代v1：JSONL 存储、飞书机器人交互、信号去重、中文名标识、CLI 增强、数据清理 |
+| v3.1 | 2026-04-29 | 迭代v2：/watchlist 交互删除、/allstock 二级导航、长桥持仓同步、卡片回调、WebSocket 重试、daemon 修复 |
 
 ---
 
