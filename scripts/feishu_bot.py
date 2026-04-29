@@ -26,7 +26,7 @@ from lark_oapi.ws import Client as WsClient
 
 from core.config import load_config
 from core.market import get_all_tickers_with_names, get_ticker_name
-from core.display import format_ratio_display, format_ticker_line
+from core.display import format_ratio_display, format_ticker_line, build_market_table, build_brief_elements
 
 # 全局变量
 running = threading.Event()
@@ -225,44 +225,24 @@ def build_signals_card() -> dict:
 
 
 def build_brief_card() -> dict:
-    """构建量比简报卡片（表格格式）"""
+    """构建量比简报卡片（飞书原生表格）"""
     from compute import compute_all
 
     results = compute_all()
     if not results:
-        content = "无数据"
-    else:
-        sorted_results = sorted(results, key=lambda x: x.get("ratio", 0), reverse=True)
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {"title": {"tag": "plain_text", "content": "📋 量比简报"}},
+            "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "无数据"}}],
+        }
 
-        us = [r for r in sorted_results if r["ticker"].endswith(".US")]
-        hk = [r for r in sorted_results if r["ticker"].endswith(".HK")]
-        cn = [r for r in sorted_results if r["ticker"].endswith((".SH", ".SZ"))]
-
-        tables = []
-        for label, tickers in [("🇺🇸 美股", us), ("🇭🇰 港股", hk), ("🇨🇳 A股", cn)]:
-            if not tickers:
-                continue
-            rows = ["| 标的 | 价格 | 涨跌 | 量比 | 状态 |", "| :-- | :-- | :-- | :-- | :-- |"]
-            for r in tickers:
-                ratio = r.get("ratio", 0)
-                change = r.get("change_pct", 0)
-                name = r.get("name", r["ticker"])
-                ticker = r["ticker"]
-                price = r.get("price", 0)
-                direction = "↑" if change > 0 else "↓"
-                ratio_display = format_ratio_display(ratio)
-                emoji = "🔥" if ratio > 2.0 else ("⚠️" if ratio < 0.8 else "✅")
-                rows.append(f"| {ticker}-{name} | ${price} | {direction}{abs(change):.1f}% | {ratio:.1f} | {emoji} {ratio_display} |")
-            tables.append(f"**{label}**\n" + "\n".join(rows))
-
-        content = "\n\n".join(tables)
+    sorted_results = sorted(results, key=lambda x: x.get("ratio", 0), reverse=True)
+    elements = build_brief_elements(sorted_results)
 
     return {
         "config": {"wide_screen_mode": True},
         "header": {"title": {"tag": "plain_text", "content": f"📋 量比简报 {datetime.now().strftime('%H:%M')}"}},
-        "elements": [
-            {"tag": "div", "text": {"tag": "lark_md", "content": content}}
-        ]
+        "elements": elements,
     }
 
 
