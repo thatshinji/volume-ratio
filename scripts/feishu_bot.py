@@ -225,7 +225,7 @@ def build_signals_card() -> dict:
 
 
 def build_brief_card() -> dict:
-    """构建量比简报卡片"""
+    """构建量比简报卡片（表格格式）"""
     from compute import compute_all
 
     results = compute_all()
@@ -233,26 +233,33 @@ def build_brief_card() -> dict:
         content = "无数据"
     else:
         sorted_results = sorted(results, key=lambda x: x.get("ratio", 0), reverse=True)
-        lines = [f"**{datetime.now().strftime('%H:%M')} 量比简报**", ""]
 
         us = [r for r in sorted_results if r["ticker"].endswith(".US")]
         hk = [r for r in sorted_results if r["ticker"].endswith(".HK")]
         cn = [r for r in sorted_results if r["ticker"].endswith((".SH", ".SZ"))]
 
+        tables = []
         for label, tickers in [("🇺🇸 美股", us), ("🇭🇰 港股", hk), ("🇨🇳 A股", cn)]:
             if not tickers:
                 continue
-            lines.append(f"**{label}:**")
+            rows = ["| 标的 | 价格 | 涨跌 | 量比 | 状态 |", "| :-- | :-- | :-- | :-- | :-- |"]
             for r in tickers:
+                ratio = r.get("ratio", 0)
+                change = r.get("change_pct", 0)
                 name = r.get("name", r["ticker"])
-                lines.append(format_ticker_line(r["ticker"], name, r.get("change_pct", 0), r.get("ratio", 0)))
-            lines.append("")
+                ticker = r["ticker"]
+                price = r.get("price", 0)
+                direction = "↑" if change > 0 else "↓"
+                ratio_display = format_ratio_display(ratio)
+                emoji = "🔥" if ratio > 2.0 else ("⚠️" if ratio < 0.8 else "✅")
+                rows.append(f"| {ticker}-{name} | ${price} | {direction}{abs(change):.1f}% | {ratio:.1f} | {emoji} {ratio_display} |")
+            tables.append(f"**{label}**\n" + "\n".join(rows))
 
-        content = "\n".join(lines)
+        content = "\n\n".join(tables)
 
     return {
         "config": {"wide_screen_mode": True},
-        "header": {"title": {"tag": "plain_text", "content": "📋 量比简报"}},
+        "header": {"title": {"tag": "plain_text", "content": f"📋 量比简报 {datetime.now().strftime('%H:%M')}"}},
         "elements": [
             {"tag": "div", "text": {"tag": "lark_md", "content": content}}
         ]
