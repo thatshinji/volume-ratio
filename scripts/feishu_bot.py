@@ -364,6 +364,7 @@ def build_watchlist_card() -> dict:
 def build_allstock_card() -> dict:
     """构建全部股票卡片（排除量比监控和持仓，带添加按钮）"""
     from longbridge_sync import fetch_other_groups
+    MAX_PER_GROUP = 15  # 每组最多显示的股票数
 
     try:
         groups = fetch_other_groups(exclude_names=["量比监控"])
@@ -382,40 +383,40 @@ def build_allstock_card() -> dict:
         }
 
     elements = []
+    total_shown = 0
+
     for group_name, stocks in groups.items():
-        elements.append({"tag": "markdown", "content": f"**📁 {group_name}**"})
+        shown = stocks[:MAX_PER_GROUP]
+        remaining = len(stocks) - len(shown)
 
-        rows = []
-        for ticker, name in stocks:
-            rows.append({"ticker": f"{ticker}-{name}", "action": "添加到量比"})
+        # 文本列表
+        lines = []
+        for ticker, name in shown:
+            lines.append(f"**{ticker}**-{name}")
+        if remaining > 0:
+            lines.append(f"_...还有 {remaining} 只_")
 
-        elements.append({
-            "tag": "table",
-            "page_size": len(rows),
-            "row_height": "low",
-            "header_style": {
-                "text_align": "left",
-                "text_size": "normal",
-                "background_style": "grey",
-                "bold": True,
-                "lines": 1,
-            },
-            "columns": [
-                {"name": "ticker", "display_name": "标的", "width": "auto", "horizontal_align": "left", "data_type": "text"},
-                {"name": "action", "display_name": "操作", "width": "auto", "horizontal_align": "center", "data_type": "text"},
-            ],
-            "rows": rows,
-        })
+        elements.append({"tag": "markdown", "content": f"**📁 {group_name}（{len(stocks)} 只）**\n" + "\n".join(lines)})
 
-        buttons = []
-        for ticker, name in stocks:
-            buttons.append({
-                "tag": "button",
-                "text": {"tag": "plain_text", "content": f"➕ {ticker}"},
-                "type": "primary",
-                "value": {"action": "add_to_monitor", "ticker": ticker, "name": name},
-            })
-        elements.append({"tag": "action", "actions": buttons})
+        # 按钮：只给展示的股票加按钮，每行 5 个
+        for i in range(0, len(shown), 5):
+            chunk = shown[i:i + 5]
+            buttons = []
+            for ticker, name in chunk:
+                buttons.append({
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": f"➕ {ticker}"},
+                    "type": "primary",
+                    "value": {"action": "add_to_monitor", "ticker": ticker, "name": name},
+                })
+            elements.append({"tag": "action", "actions": buttons})
+
+        total_shown += len(shown)
+
+    # 底部提示
+    total_all = sum(len(s) for s in groups.values())
+    if total_all > total_shown:
+        elements.append({"tag": "markdown", "content": f"_共 {total_all} 只，展示前 {total_shown} 只。使用 `/add TICKER-名称` 添加更多_"})
 
     return {
         "config": {"wide_screen_mode": True},
