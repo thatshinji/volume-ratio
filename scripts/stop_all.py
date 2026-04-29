@@ -77,6 +77,7 @@ def main():
     remove_cron("collect_ws_launcher.py")
     remove_cron("feishu_bot_launcher.py")
     remove_cron("volume-ratio/scripts/alert.py")
+    remove_cron("volume-ratio/scripts/longbridge_sync.py")
     remove_cron("volume-ratio/scripts/cleanup.py")
     print()
 

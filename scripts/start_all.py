@@ -128,12 +128,15 @@ def main():
     python_bin = str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
     launcher_python = "/usr/bin/python3"  # launcher 必须用系统 Python（longbridge 未装在 venv）
 
+    sync_script = SCRIPTS_DIR / "longbridge_sync.py"
+
     # 1. 添加 cron 任务
     print("[1/4] 配置 cron 任务...")
     add_cron(f"*/1 * * * 1-5 {launcher_python} {ws_launcher_script} >> {LOG_DIR}/launcher.log 2>&1")
     add_cron(f"*/1 * * * {python_bin} {bot_launcher_script} >> {LOG_DIR}/launcher.log 2>&1")
     add_cron(f"*/1 * * * 1-5 {python_bin} {alert_script} >> {LOG_DIR}/alert.log 2>&1")
     add_cron(f"*/30 * * * 1-5 {python_bin} {alert_script} --brief >> {LOG_DIR}/brief.log 2>&1")
+    add_cron(f"*/30 * * * 1-5 {python_bin} {sync_script} >> {LOG_DIR}/sync.log 2>&1")
     add_cron(f"0 * * * * {python_bin} {cleanup_script} >> {LOG_DIR}/cleanup.log 2>&1")
     print()
 

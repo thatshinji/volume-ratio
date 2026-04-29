@@ -224,6 +224,47 @@ def build_signals_card() -> dict:
     }
 
 
+def build_sync_card() -> dict:
+    """构建同步结果卡片"""
+    from longbridge_sync import run_sync
+
+    try:
+        result = run_sync()
+    except Exception as e:
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {"title": {"tag": "plain_text", "content": "❌ 同步失败"}},
+            "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": f"错误: {e}"}}],
+        }
+
+    lines = []
+    # 持仓
+    lines.append(f"**持仓 ({len(result['positions'])}):** {', '.join(result['positions']) or '无'}")
+    lines.append(f"**自选股 ({len(result['watchlist'])}):** {', '.join(result['watchlist']) or '无'}")
+    lines.append("")
+
+    # 变更
+    if result["added"]:
+        lines.append(f"**新增:** {', '.join(result['added'])}")
+    if result["removed"]:
+        lines.append(f"**移除:** {', '.join(result['removed'])}")
+    if not result["added"] and not result["removed"]:
+        lines.append("**无变更**")
+    lines.append("")
+
+    # 最终列表
+    for market_label, key in [("🇺🇸 美股", "us"), ("🇭🇰 港股", "hk"), ("🇨🇳 A股", "cn")]:
+        tickers = result["final"].get(key, [])
+        if tickers:
+            lines.append(f"**{market_label} ({len(tickers)}):** {', '.join(tickers)}")
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"title": {"tag": "plain_text", "content": "🔄 同步监控列表"}},
+        "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}}],
+    }
+
+
 def build_brief_card() -> dict:
     """构建量比简报卡片（飞书原生表格）"""
     from compute import compute_all
@@ -443,13 +484,16 @@ def handle_command(client: lark.Client, chat_id: str, text: str):
             output = sys.stdout.getvalue()
         finally:
             sys.stdout = old_stdout
-        # 飞书文本有长度限制，截断
         if len(output) > 4000:
             output = output[:4000] + "\n...(截断)"
         send_text(client, chat_id, output.strip())
 
+    elif text == "/sync":
+        card = build_sync_card()
+        send_card(client, chat_id, card)
+
     else:
-        send_text(client, chat_id, f"未知指令: {text}\n\n可用指令:\n/start - 启动量比系统\n/stop - 关停量比系统\n/status - 系统状态\n/scan - 量比扫描\n/signals - 今日信号\n/brief - 量比简报\n/add CLF.US-名称 - 添加标的\n/remove CLF.US - 移除标的\n/mute CLF.US 2h - 静默\n/history CLF.US - 历史量比")
+        send_text(client, chat_id, f"未知指令: {text}\n\n可用指令:\n/start - 启动量比系统\n/stop - 关停量比系统\n/sync - 同步长桥持仓+自选股\n/status - 系统状态\n/scan - 量比扫描\n/signals - 今日信号\n/brief - 量比简报\n/add CLF.US-名称 - 添加标的\n/remove CLF.US - 移除标的\n/mute CLF.US 2h - 静默\n/history CLF.US - 历史量比")
 
 
 def on_message(client: lark.Client, event: lark.EventDispatcherHandler):
