@@ -11,6 +11,7 @@ Usage:
 import json
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -118,11 +119,25 @@ def build_status_card() -> dict:
         lines.append("**WebSocket:** ❌ 未运行")
 
     # LLM
-    lines.append(f"**LLM:** ✅ {llm.get('model', '未配置')}")
+    llm_model = llm.get('model', '未配置')
+    lines.append(f"**LLM:** ✅ {llm_model}")
+
+    # LLM 调用次数
+    if db_path.exists():
+        try:
+            with sqlite3.connect(db_path, timeout=5) as conn:
+                today = datetime.now().strftime("%Y-%m-%d")
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM llm_calls WHERE timestamp LIKE ?",
+                    (f"{today}%",)
+                ).fetchone()
+                llm_count = row[0] if row else 0
+                lines.append(f"**LLM 调用:** 今日 {llm_count} 次")
+        except sqlite3.Error:
+            pass
 
     # 数据库
     if db_path.exists():
-        import sqlite3
         try:
             with sqlite3.connect(db_path, timeout=5) as conn:
                 count = conn.execute("SELECT COUNT(*) FROM volume_ratios").fetchone()[0]

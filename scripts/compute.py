@@ -181,6 +181,14 @@ def init_db():
                 notified INTEGER DEFAULT 1
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS llm_calls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                model TEXT,
+                success INTEGER DEFAULT 1
+            )
+        """)
     _db_initialized = True
 
 

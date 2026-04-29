@@ -90,6 +90,23 @@ def switch_llm(profile_name: str) -> bool:
     return True
 
 
+def log_llm_call(model: str, success: bool = True):
+    """记录 LLM 调用到数据库"""
+    import sqlite3
+    from datetime import datetime
+    db_path = ROOT / "data" / "ratios.db"
+    if not db_path.exists():
+        return
+    try:
+        with sqlite3.connect(str(db_path), timeout=5) as conn:
+            conn.execute(
+                "INSERT INTO llm_calls (timestamp, model, success) VALUES (?, ?, ?)",
+                (datetime.now().isoformat(), model, 1 if success else 0)
+            )
+    except sqlite3.Error:
+        pass
+
+
 def call_llm(prompt: str, model: str = None) -> Optional[str]:
     """
     通用 LLM 调用
@@ -124,6 +141,7 @@ def call_llm(prompt: str, model: str = None) -> Optional[str]:
         if resp.status_code == 200:
             data = resp.json()
             content = data.get("content", [])
+            log_llm_call(model_name, success=True)
 
             # 通用解析：找第一个 text 类型
             for item in content:
@@ -132,9 +150,11 @@ def call_llm(prompt: str, model: str = None) -> Optional[str]:
             return None
         else:
             print(f"[llm] API 错误: {resp.status_code}")
+            log_llm_call(model_name, success=False)
             return None
     except (requests.ConnectionError, requests.Timeout, ValueError) as e:
         print(f"[llm] 调用异常: {e}")
+        log_llm_call(model_name, success=False)
         return None
 
 
