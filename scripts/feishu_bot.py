@@ -11,6 +11,7 @@ Usage:
 import json
 import os
 import signal
+import subprocess
 import sys
 import threading
 from datetime import datetime
@@ -258,12 +259,68 @@ def build_brief_card() -> dict:
     }
 
 
+def build_start_card(output: str) -> dict:
+    """构建启动结果卡片"""
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"title": {"tag": "plain_text", "content": "🚀 启动量比系统"}},
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"```\n{output}\n```"}}
+        ]
+    }
+
+
+def build_stop_card(output: str) -> dict:
+    """构建关停结果卡片"""
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"title": {"tag": "plain_text", "content": "🛑 关停量比系统"}},
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"```\n{output}\n```"}}
+        ]
+    }
+
+
 def handle_command(client: lark.Client, chat_id: str, text: str):
     """处理用户指令"""
     text = text.strip()
     print(f"[bot] 收到指令: {text}", flush=True)
 
-    if text == "/status":
+    if text == "/start":
+        send_text(client, chat_id, "正在启动量比系统...")
+        try:
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "scripts" / "start_all.py")],
+                capture_output=True, text=True, timeout=60
+            )
+            output = result.stdout + result.stderr
+            if len(output) > 3000:
+                output = output[:3000] + "\n...(截断)"
+            card = build_start_card(output.strip() or "启动完成（无输出）")
+            send_card(client, chat_id, card)
+        except subprocess.TimeoutExpired:
+            send_text(client, chat_id, "启动超时（>60秒），请检查日志")
+        except Exception as e:
+            send_text(client, chat_id, f"启动失败: {e}")
+
+    elif text == "/stop":
+        send_text(client, chat_id, "正在关停量比系统...")
+        try:
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "scripts" / "stop_all.py")],
+                capture_output=True, text=True, timeout=60
+            )
+            output = result.stdout + result.stderr
+            if len(output) > 3000:
+                output = output[:3000] + "\n...(截断)"
+            card = build_stop_card(output.strip() or "关停完成（无输出）")
+            send_card(client, chat_id, card)
+        except subprocess.TimeoutExpired:
+            send_text(client, chat_id, "关停超时（>60秒），请检查日志")
+        except Exception as e:
+            send_text(client, chat_id, f"关停失败: {e}")
+
+    elif text == "/status":
         card = build_status_card()
         send_card(client, chat_id, card)
 
@@ -338,7 +395,7 @@ def handle_command(client: lark.Client, chat_id: str, text: str):
         send_text(client, chat_id, output.strip())
 
     else:
-        send_text(client, chat_id, f"未知指令: {text}\n\n可用指令:\n/status - 系统状态\n/scan - 量比扫描\n/signals - 今日信号\n/brief - 量比简报\n/add CLF.US-名称 - 添加标的\n/remove CLF.US - 移除标的\n/mute CLF.US 2h - 静默\n/history CLF.US - 历史量比")
+        send_text(client, chat_id, f"未知指令: {text}\n\n可用指令:\n/start - 启动量比系统\n/stop - 关停量比系统\n/status - 系统状态\n/scan - 量比扫描\n/signals - 今日信号\n/brief - 量比简报\n/add CLF.US-名称 - 添加标的\n/remove CLF.US - 移除标的\n/mute CLF.US 2h - 静默\n/history CLF.US - 历史量比")
 
 
 def on_message(client: lark.Client, event: lark.EventDispatcherHandler):
