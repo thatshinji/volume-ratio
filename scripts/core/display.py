@@ -31,7 +31,7 @@ def format_ticker_line(ticker: str, name: str, change_pct: float,
     统一格式：代码  中文名  涨跌  量比 符号 中文  状态
     示例: CLF.US    克利夫兰   ↓3.0%  2.1 ⬆⬆  放量  🔥
     """
-    direction = "↑" if change_pct > 0 else "↓"
+    direction = "↑" if change_pct > 0 else ("↓" if change_pct < 0 else "─")
     ratio_str = format_ratio_display(ratio)
     emoji = "🔥" if ratio > 2.0 else ("⚠️" if ratio < 0.8 else "✅")
 

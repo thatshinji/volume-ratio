@@ -486,9 +486,11 @@ def scan_and_alert():
 
     lock_file = ROOT / "logs" / "alert.lock"
     lock_file.parent.mkdir(exist_ok=True)
-    with open(lock_file, "w") as lf:
+    with open(lock_file, "a+") as lf:
         try:
             fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lf.seek(0)
+            lf.truncate()
             lf.write(str(os.getpid()))
             lf.flush()
         except BlockingIOError:
@@ -519,11 +521,14 @@ def scan_and_alert():
             ticker = alert.get("ticker", "")
             ratio = alert.get("ratio", 0)
             signal = alert.get("signal", "")
+            signal_detail = alert.get("signal_detail", "")
             source = alert.get("source", "historical")
 
             # 确定信号状态
-            if signal in ("放量止跌", "放量突破", "放量下跌", "缩量止跌"):
-                new_state = signal
+            special_signals = ("放量止跌", "放量突破", "放量下跌", "缩量止跌")
+            effective_signal = signal_detail if signal_detail in special_signals else signal
+            if effective_signal in special_signals:
+                new_state = effective_signal
             elif ratio > 2.0:
                 new_state = "放量突破" if alert.get("change_pct", 0) > 0 else "放量下跌"
             elif ratio > 1.5:
@@ -543,7 +548,7 @@ def scan_and_alert():
 
             # 判断是否需要 LLM 分析
             is_significant = (
-                signal in ("放量突破", "放量下跌") or
+                effective_signal in ("放量突破", "放量下跌") or
                 (ratio > 2.5 and alert.get("change_pct", 0) != 0)
             )
 
