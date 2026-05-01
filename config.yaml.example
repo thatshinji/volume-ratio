@@ -35,7 +35,6 @@ params:
   intraday_baseline_minutes: 30       # 日内滚动量比：前 B 分钟基线
   intraday_baseline_method: mean      # mean / median
   intraday_alert_threshold: 1.5
-  snapshot_interval: 60
   alert_threshold: 2.0
   shrink_threshold: 0.6
 

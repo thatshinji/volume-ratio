@@ -134,7 +134,8 @@ volume-ratio/
 │   ├── core/                # 核心模块
 │   │   ├── config.py        #   配置加载（热加载）
 │   │   ├── market.py        #   市场判断 + 标的管理
-│   │   └── display.py       #   量比符号 + 格式化显示
+│   │   ├── display.py       #   量比符号 + 格式化显示
+│   │   └── silence.py       #   Longbridge SDK 输出静音（安全恢复 fd）
 │   ├── collect_ws.py        # WebSocket 实时行情采集
 │   ├── collect_ws_launcher.py  # WebSocket 守护进程（cron）
 │   ├── compute.py           # 量比计算引擎
@@ -395,6 +396,8 @@ python3 scripts/llm.py --test
 | `longbridge_sync.py` | 每30分钟（工作日） | 同步长桥持仓+自选股 |
 | `cleanup.py` | 每小时 | 清理过期数据（各市场收盘后 1 小时触发） |
 
+`longbridge_sync.py` 只有在 watchlist 实际变化时才会写入 `config.yaml` 并重启 WebSocket；如果长桥接口失败，或返回空列表但本地已有监控标的，会中止同步并保留现有配置，避免误清空 watchlist。
+
 ### 7.2 一键管理
 
 ```bash
@@ -504,6 +507,8 @@ python3 scripts/cleanup.py --status
 python3 scripts/cleanup.py --dry-run
 ```
 
+`/status` 和 `python3 scripts/cli.py --status` 会展示当前数据库/快照占用与上限，例如 `2.9MB / 1.00GB`、`513.7MB / 3.00GB`。
+
 ---
 
 ## 九、故障排查
@@ -530,7 +535,8 @@ python3 scripts/cleanup.py --dry-run
 - WebSocket 后续会在写入原始快照时同步更新分钟聚合表，正常运行不再需要每分钟扫描全量 JSONL
 
 **Q: REST API 或 trading_days 日志出现 Bad file descriptor**
-- 当前版本不再用 `os.dup2()` 抑制 Longbridge SDK 输出，只在 Python 层临时 redirect `sys.stdout`
+- 当前版本通过 `core.silence.suppress_stdout()` 临时重定向并恢复 stdout/stderr 文件描述符，用于压制 Longbridge SDK 的原生输出；不会让 fd 1/2 指向已关闭文件
+- Longbridge SDK 偶发底层 `PanicException` 时，计算会降级使用本地快照/分钟聚合数据；同步任务会保留现有配置，不会清空 watchlist
 - 如果仍看到旧日志，先确认运行的是最新代码并重启 WebSocket/飞书机器人/cron 相关进程
 
 **Q: 飞书机器人不响应**
@@ -593,6 +599,7 @@ dependencies = [
 | v3.3 | 2026-05-01 | 量比数据源切换 REST API、假期检测（trading_days API）、数据库索引优化、代码审查缺陷修复（FD double-close / 竞态条件 / PID 锁 / mute 过期等 8 项） |
 | v3.4 | 2026-05-01 | 重写量比算法：5日历史同期量比 + 日内滚动量比；新增 schema v2、交易日按日期过滤、休市保护、日内基准样本门槛 |
 | v3.5 | 2026-05-01 | 性能优化：新增 schema v3 `quote_minute_bars` 分钟聚合主计算表、JSONL 回填脚本、alert 扫描休市跳过；修复 Longbridge stdout fd 风险 |
+| v3.6 | 2026-05-01 | 稳定性优化：快照 3GB/数据库 1GB 容量兜底、Longbridge SDK 安全静音、同步失败保护、无变化不重启 WebSocket、状态展示容量上限 |
 
 ---
 
