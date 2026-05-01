@@ -28,14 +28,42 @@ def add_cron(line: str):
     print(f"[start] 已添加 cron: {line.strip()}")
 
 
+def runtime_lock_is_held(lock_file: Path, pid_file: Path) -> bool:
+    if not lock_file.exists():
+        return False
+    try:
+        with open(lock_file, "r+") as lf:
+            try:
+                fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(lf, fcntl.LOCK_UN)
+                return False
+            except BlockingIOError:
+                pid_text = lf.read().strip()
+                if pid_text:
+                    pid_file.write_text(pid_text)
+                    print(f"[start] 已在运行，PID: {pid_text}")
+                else:
+                    print("[start] 已在运行")
+                return True
+    except OSError:
+        return False
+
+
 def start_websocket():
     """直接启动 WebSocket 采集进程"""
     pid_file = LOG_DIR / "ws_collect.pid"
     lock_file = LOG_DIR / "ws_collect.lock"
 
+    if runtime_lock_is_held(lock_file, pid_file):
+        return
+
     # 使用文件锁防止竞态条件
     with open(lock_file, "w") as lf:
-        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("[start] WebSocket 已在运行")
+            return
         try:
             if pid_file.exists():
                 try:
@@ -67,9 +95,16 @@ def start_feishu_bot():
     pid_file = LOG_DIR / "feishu_bot.pid"
     lock_file = LOG_DIR / "feishu_bot.lock"
 
+    if runtime_lock_is_held(lock_file, pid_file):
+        return
+
     # 使用文件锁防止竞态条件
     with open(lock_file, "w") as lf:
-        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("[start] 飞书机器人已在运行")
+            return
         try:
             if pid_file.exists():
                 try:
@@ -93,32 +128,18 @@ def start_feishu_bot():
             print("[start] 启动飞书机器人...")
             python_bin = str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
 
-            pid = os.fork()
-            if pid > 0:
-                pid_file.write_text(str(pid))
-                print(f"[start] 飞书机器人启动，PID: {pid}")
-                return
+            proc = subprocess.Popen(
+                [python_bin, str(SCRIPTS_DIR / "feishu_bot.py")],
+                stdin=subprocess.DEVNULL,
+                stdout=open(LOG_DIR / "feishu_bot.log", "a"),
+                stderr=open(LOG_DIR / "feishu_bot.err", "a"),
+                start_new_session=True,
+            )
+            pid_file.write_text(str(proc.pid))
+            print(f"[start] 飞书机器人启动，PID: {proc.pid}")
+            return
         finally:
             fcntl.flock(lf, fcntl.LOCK_UN)
-
-    os.setsid()
-    pid = os.fork()
-    if pid > 0:
-        os._exit(0)
-
-    devnull = os.open(os.devnull, os.O_RDONLY)
-    os.dup2(devnull, 0)
-    os.close(devnull)
-
-    out_fd = os.open(LOG_DIR / "feishu_bot.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-    os.dup2(out_fd, 1)
-    os.close(out_fd)
-
-    err_fd = os.open(LOG_DIR / "feishu_bot.err", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-    os.dup2(err_fd, 2)
-    os.close(err_fd)
-
-    os.execv(python_bin, [python_bin, str(SCRIPTS_DIR / "feishu_bot.py")])
 
 
 def main():

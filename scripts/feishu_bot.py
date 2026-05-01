@@ -15,6 +15,8 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
+import fcntl
 from datetime import datetime
 from pathlib import Path
 
@@ -35,6 +37,66 @@ from core.display import format_ratio_display, format_ticker_line, build_market_
 # 全局变量
 running = threading.Event()
 running.set()
+_instance_lock_file = None
+_processed_messages = {}
+_processed_lock = threading.Lock()
+_stdout_capture_lock = threading.Lock()
+MESSAGE_DEDUPE_TTL = 600
+
+
+def acquire_instance_lock() -> bool:
+    """确保只有一个飞书机器人实例消费事件。"""
+    global _instance_lock_file
+    lock_path = ROOT / "logs" / "feishu_bot.lock"
+    lock_path.parent.mkdir(exist_ok=True)
+    _instance_lock_file = open(lock_path, "w")
+    try:
+        fcntl.flock(_instance_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _instance_lock_file.write(str(os.getpid()))
+        _instance_lock_file.flush()
+        return True
+    except BlockingIOError:
+        print("[bot] 已有飞书机器人实例运行，当前进程退出", flush=True)
+        return False
+
+
+def _message_dedupe_key(data, msg, text: str) -> str:
+    message_id = getattr(msg, "message_id", "") or ""
+    if message_id:
+        return f"message:{message_id}"
+    header = getattr(data, "header", None)
+    event_id = getattr(header, "event_id", "") or ""
+    if event_id:
+        return f"event:{event_id}"
+    chat_id = getattr(msg, "chat_id", "") or ""
+    create_time = getattr(msg, "create_time", "") or ""
+    return f"fallback:{chat_id}:{create_time}:{text}"
+
+
+def mark_message_seen(key: str) -> bool:
+    """返回 True 表示首次看到；False 表示短时间内重复投递。"""
+    now = time.time()
+    with _processed_lock:
+        expired = [k for k, ts in _processed_messages.items() if now - ts > MESSAGE_DEDUPE_TTL]
+        for k in expired:
+            del _processed_messages[k]
+        if key in _processed_messages:
+            return False
+        _processed_messages[key] = now
+        return True
+
+
+def capture_stdout(func, *args) -> str:
+    """串行捕获 CLI helper 的 stdout，避免并发事件改写全局 sys.stdout。"""
+    import io
+    with _stdout_capture_lock:
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            func(*args)
+            return sys.stdout.getvalue()
+        finally:
+            sys.stdout = old_stdout
 
 
 def get_feishu_config() -> dict:
@@ -865,41 +927,20 @@ def handle_command(client: lark.Client, chat_id: str, text: str):
     elif text.startswith("/add "):
         raw = text[5:].strip()
         from cli import cmd_add_ticker
-        import io
-        old_stdout = sys.stdout
-        sys.stdout = io.StringIO()
-        try:
-            cmd_add_ticker(raw)
-            output = sys.stdout.getvalue()
-        finally:
-            sys.stdout = old_stdout
+        output = capture_stdout(cmd_add_ticker, raw)
         send_text(client, chat_id, output.strip())
 
     elif text.startswith("/remove "):
         ticker = text[8:].strip()
         from cli import cmd_remove_ticker
-        import io
-        old_stdout = sys.stdout
-        sys.stdout = io.StringIO()
-        try:
-            cmd_remove_ticker(ticker)
-            output = sys.stdout.getvalue()
-        finally:
-            sys.stdout = old_stdout
+        output = capture_stdout(cmd_remove_ticker, ticker)
         send_text(client, chat_id, output.strip())
 
     elif text.startswith("/mute "):
         parts = text[6:].strip().split()
         if len(parts) >= 2:
             from cli import cmd_mute
-            import io
-            old_stdout = sys.stdout
-            sys.stdout = io.StringIO()
-            try:
-                cmd_mute(parts[0], parts[1])
-                output = sys.stdout.getvalue()
-            finally:
-                sys.stdout = old_stdout
+            output = capture_stdout(cmd_mute, parts[0], parts[1])
             send_text(client, chat_id, output.strip())
         else:
             send_text(client, chat_id, "格式: /mute TICKER DURATION (例: /mute CLF.US 2h)")
@@ -907,14 +948,7 @@ def handle_command(client: lark.Client, chat_id: str, text: str):
     elif text.startswith("/history "):
         ticker = text[9:].strip()
         from cli import cmd_history
-        import io
-        old_stdout = sys.stdout
-        sys.stdout = io.StringIO()
-        try:
-            cmd_history(ticker)
-            output = sys.stdout.getvalue()
-        finally:
-            sys.stdout = old_stdout
+        output = capture_stdout(cmd_history, ticker)
         if len(output) > 4000:
             output = output[:4000] + "\n...(截断)"
         send_text(client, chat_id, output.strip())
@@ -981,6 +1015,13 @@ def main():
         # 注意：不带 --daemon 参数，避免无限循环
         os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve())])
 
+    if not acquire_instance_lock():
+        return
+
+    pid_file = ROOT / "logs" / "feishu_bot.pid"
+    pid_file.parent.mkdir(exist_ok=True)
+    pid_file.write_text(str(os.getpid()))
+
     cfg = get_feishu_config()
     api_client = create_client()
 
@@ -998,6 +1039,10 @@ def main():
                 # 移除 @机器人 的提及
                 if text.startswith("@"):
                     text = text.split(" ", 1)[-1] if " " in text else text
+                dedupe_key = _message_dedupe_key(data, msg, text)
+                if not mark_message_seen(dedupe_key):
+                    print(f"[bot] 忽略重复消息: {text} ({dedupe_key})", flush=True)
+                    return
                 print(f"[bot] 收到消息: {text}", flush=True)
                 handle_command(api_client, chat_id, text)
         except Exception as e:
