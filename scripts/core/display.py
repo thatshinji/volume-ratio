@@ -8,20 +8,20 @@ from typing import List
 def format_ratio_display(ratio: float) -> str:
     """
     量比显示：符号 + 中文双标识
-    用符号快速扫描，中文确认含义
+    阈值与 get_signal() 保持一致
     """
     if ratio > 5.0:
         return "⬆⬆⬆ 巨量"
     elif ratio > 2.0:
-        return "⬆⬆  放量"
-    elif ratio > 1.5:
-        return "⬆   温放"
+        return "⬆⬆  显著放量"
+    elif ratio > 1.2:
+        return "⬆   放量"
     elif ratio > 0.8:
         return "─    正常"
-    elif ratio > 0.5:
+    elif ratio > 0.6:
         return "⬇   缩量"
     else:
-        return "⬇⬇  地量"
+        return "⬇⬇  缩量异常"
 
 
 def format_ticker_line(ticker: str, name: str, change_pct: float,

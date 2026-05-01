@@ -28,8 +28,20 @@ SIGNAL_RULES = {
     "放量突破": lambda ratio, change: ratio > 2.0 and change > 2,
     "放量下跌": lambda ratio, change: ratio > 2.0 and change < -2,
     "缩量止跌": lambda ratio, change: ratio < 0.6 and change > 0,
-    "尾盘放量": lambda ratio, change: ratio > 1.5 and 14 <= datetime.now().hour <= 15,
 }
+
+
+def _is_end_of_day(market: str) -> bool:
+    """判断是否为市场尾盘时段（仅 CN 14:30-15:00）"""
+    if market != "CN":
+        return False
+    try:
+        import pytz
+        tz = pytz.timezone("Asia/Shanghai")
+        now = datetime.now(pytz.UTC).astimezone(tz)
+    except ImportError:
+        now = datetime.now()
+    return (now.hour == 14 and now.minute >= 30) or now.hour == 15
 
 
 # === LLM Prompt 模板 ===
@@ -100,7 +112,12 @@ def detect_signals(results: List[dict]) -> List[dict]:
             if rule(ratio, change_pct):
                 triggered.append(sig_name)
 
-        if signal != "数据不足":
+        # 尾盘放量（仅 CN 市场 14:30-15:00）
+        if not triggered and ratio > 1.5 and _is_end_of_day(market):
+            triggered.append("尾盘放量")
+
+        # 阈值检查（仅在 SIGNAL_RULES 未匹配时）
+        if not triggered and signal != "数据不足":
             if ratio > alert_threshold:
                 triggered.append(f"放量(>{alert_threshold})")
             elif ratio < shrink_threshold:
@@ -159,7 +176,13 @@ def detect_signals(results: List[dict]) -> List[dict]:
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             yaml.dump(config, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
 
-    return alerts
+    # 按 ticker 去重：同一 ticker 保留 intraday 优先
+    seen = {}
+    for alert in alerts:
+        ticker = alert["ticker"]
+        if ticker not in seen or alert.get("source") == "intraday":
+            seen[ticker] = alert
+    return list(seen.values())
 
 
 def format_alert_card(alert: dict, analysis: Optional[str] = None) -> dict:

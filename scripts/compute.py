@@ -226,15 +226,11 @@ def get_historical_day_volume(ticker: str, day: datetime, api_vol_data: dict = N
     if (ticker, day_str) in _historical_vol_cache:
         return _historical_vol_cache[(ticker, day_str)]
 
-    # 3. 回退到 JSONL 计算
+    # 3. 回退到 JSONL 计算（最后一条快照的累计量 = 全天量）
     records = read_snapshots(ticker, day)
     if not records:
         return 0.0
-    if len(records) < 2:
-        return float(records[-1].get("volume", 0))
-    first_vol = float(records[0].get("volume", 0))
-    last_vol = float(records[-1].get("volume", 0))
-    return max(0.0, last_vol - first_vol)
+    return float(records[-1].get("volume", 0))
 
 
 def get_today_volume(ticker: str, current_time: datetime = None) -> float:
@@ -315,7 +311,7 @@ def init_db():
 
 def calc_volume_ratio(ticker: str, current_time: datetime = None, api_vol_data: dict = None) -> tuple:
     """
-    计算量比
+    日级别量比 = 今日累计成交量 / 近5日平均日成交量
     返回: (ratio, today_vol, avg_5d_vol, signal)
     """
     if current_time is None:
@@ -324,7 +320,7 @@ def calc_volume_ratio(ticker: str, current_time: datetime = None, api_vol_data: 
     config = load_config()
     window = config.get("params", {}).get("volume_ratio_window", 5)
 
-    today_vol = get_today_volume(ticker, current_time)
+    today_vol = get_last_day_volume(ticker, current_time)
     past_vols = []
 
     for i in range(1, window + 1):
@@ -440,7 +436,18 @@ def calc_intraday_ratio(ticker: str, current_time: datetime = None) -> tuple:
     return round(vol_ratio, 2), signal_name, cond_vol, cond_stop, cond_stable
 
 
-def get_signal_detail(ratio: float, price_change: float = 0) -> str:
+def _get_market_now(market: str) -> datetime:
+    """获取市场本地时间"""
+    try:
+        import pytz
+        tz_map = {"CN": "Asia/Shanghai", "HK": "Asia/Hong_Kong", "US": "US/Eastern"}
+        tz = pytz.timezone(tz_map.get(market, "Asia/Shanghai"))
+        return datetime.now(pytz.UTC).astimezone(tz)
+    except ImportError:
+        return datetime.now()
+
+
+def get_signal_detail(ratio: float, price_change: float = 0, market: str = "CN") -> str:
     """获取信号详情"""
     if ratio > 2.0 and price_change > 2:
         return "放量突破"
@@ -448,10 +455,9 @@ def get_signal_detail(ratio: float, price_change: float = 0) -> str:
         return "放量下跌"
     elif ratio < 0.6 and price_change > 0:
         return "缩量止跌"
-    elif ratio > 1.5:
-        hour = datetime.now().hour
-        minute = datetime.now().minute
-        if (hour == 14 and minute >= 30) or hour == 15:
+    elif ratio > 1.5 and market == "CN":
+        now = _get_market_now(market)
+        if (now.hour == 14 and now.minute >= 30) or now.hour == 15:
             return "尾盘放量"
     return ""
 
@@ -592,7 +598,7 @@ def compute_ticker(ticker: str, api_data: dict = None, api_vol_data: dict = None
         change_pct = api_data[ticker]["change_pct"]
         api_vol = api_data[ticker]["volume"]
 
-        if not is_trading_day(ticker):
+        if not is_trading_day(get_market(ticker)):
             ratio, signal = 0.0, "休市"
         elif api_vol > 0:
             today_vol = api_vol
@@ -602,6 +608,10 @@ def compute_ticker(ticker: str, api_data: dict = None, api_vol_data: dict = None
 
     config = load_config()
     name = get_ticker_name(config, ticker)
+    market = get_market(ticker)
+
+    # 休市时清除 signal_detail，避免信息矛盾
+    signal_detail = "" if signal == "休市" else get_signal_detail(ratio, change_pct, market)
 
     result = {
         "ticker": ticker,
@@ -613,7 +623,7 @@ def compute_ticker(ticker: str, api_data: dict = None, api_vol_data: dict = None
         "price": price,
         "change_pct": round(change_pct, 2),
         "signal": signal,
-        "signal_detail": get_signal_detail(ratio, change_pct),
+        "signal_detail": signal_detail,
         "signal_intraday": signal_intraday,
         "cond_vol": cond_vol,
         "cond_stop": cond_stop,

@@ -100,6 +100,8 @@ def extract_fields(quote, ticker: str) -> dict:
         prev_close = _prev_close_cache.get(ticker, 0.0)
     if prev_close == 0:
         prev_close = open_price if open_price > 0 else last
+        if prev_close > 0:
+            print(f"[ws] 警告: {ticker} prev_close 缓存缺失，使用 fallback={prev_close}，change_pct 可能不准", flush=True)
 
     change = last - prev_close
     change_pct = (change / prev_close * 100) if prev_close > 0 else 0
