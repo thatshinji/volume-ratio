@@ -16,6 +16,7 @@ LOG_DIR.mkdir(exist_ok=True)
 
 PID_FILE = LOG_DIR / "ws_collect.pid"
 SCRIPT = ROOT / "scripts" / "collect_ws.py"
+VENV_PYTHON = ROOT / ".venv" / "bin" / "python"
 
 
 def is_running(pid: int) -> bool:
@@ -74,8 +75,9 @@ def check_and_launch():
     os.dup2(err_fd, sys.stderr.fileno())
     os.close(err_fd)
 
-    # 执行 collect_ws.py
-    os.execv(sys.executable, [sys.executable, str(SCRIPT)])
+    # 执行 collect_ws.py。cron 可用系统 Python 调 launcher，但采集进程必须用项目 venv。
+    python_bin = str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
+    os.execv(python_bin, [python_bin, str(SCRIPT)])
 
 
 if __name__ == "__main__":

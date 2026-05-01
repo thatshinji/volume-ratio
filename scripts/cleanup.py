@@ -6,6 +6,7 @@
 清理规则：
   - JSONL 快照：保留 20 天
   - quote_snapshots：保留 20 天
+  - quote_minute_bars：保留 20 天
   - volume_ratios：保留 20 天
   - signals：保留 20 天
 """
@@ -120,10 +121,11 @@ def cleanup_database(table: str, keep_days: int):
         return
 
     cutoff = (datetime.now() - timedelta(days=keep_days)).isoformat()
+    timestamp_column = "last_timestamp" if table == "quote_minute_bars" else "timestamp"
 
     try:
         with sqlite3.connect(DB_PATH, timeout=30) as conn:
-            cursor = conn.execute(f"DELETE FROM {table} WHERE timestamp < ?", (cutoff,))
+            cursor = conn.execute(f"DELETE FROM {table} WHERE {timestamp_column} < ?", (cutoff,))
             if cursor.rowcount > 0:
                 print(f"[cleanup] {table}: 删除 {cursor.rowcount} 条过期记录")
     except sqlite3.OperationalError as e:
@@ -195,6 +197,7 @@ def main():
     # 数据库清理（不分市场，按时间戳）
     if not args.dry_run:
         cleanup_database("quote_snapshots", SNAPSHOT_KEEP_DAYS)
+        cleanup_database("quote_minute_bars", SNAPSHOT_KEEP_DAYS)
         cleanup_database("volume_ratios", RATIO_KEEP_DAYS)
         cleanup_database("signals", SIGNAL_KEEP_DAYS)
 

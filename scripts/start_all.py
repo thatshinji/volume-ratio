@@ -47,32 +47,19 @@ def start_websocket():
                     pass
 
             print("[start] 启动 WebSocket 采集进程...")
-            pid = os.fork()
-            if pid > 0:
-                pid_file.write_text(str(pid))
-                print(f"[start] WebSocket 启动，PID: {pid}")
-                return
+            python_bin = str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
+            proc = subprocess.Popen(
+                [python_bin, str(SCRIPTS_DIR / "collect_ws.py")],
+                stdin=subprocess.DEVNULL,
+                stdout=open(LOG_DIR / "ws_collect.log", "a"),
+                stderr=open(LOG_DIR / "ws_collect.err", "a"),
+                start_new_session=True,
+            )
+            pid_file.write_text(str(proc.pid))
+            print(f"[start] WebSocket 启动，PID: {proc.pid}")
+            return
         finally:
             fcntl.flock(lf, fcntl.LOCK_UN)
-
-    os.setsid()
-    pid = os.fork()
-    if pid > 0:
-        os._exit(0)
-
-    devnull = os.open(os.devnull, os.O_RDONLY)
-    os.dup2(devnull, 0)
-    os.close(devnull)
-
-    out_fd = os.open(LOG_DIR / "ws_collect.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-    os.dup2(out_fd, 1)
-    os.close(out_fd)
-
-    err_fd = os.open(LOG_DIR / "ws_collect.err", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-    os.dup2(err_fd, 2)
-    os.close(err_fd)
-
-    os.execv(sys.executable, [sys.executable, str(SCRIPTS_DIR / "collect_ws.py")])
 
 
 def start_feishu_bot():

@@ -98,69 +98,172 @@ def send_card(client: lark.Client, chat_id: str, card: dict):
 
 
 def build_status_card() -> dict:
-    """构建系统状态卡片"""
-    from cli import _get_latest_snapshot_time
+    """构建系统状态卡片：服务 + 数据 + 市场 + 算法 + 推送健康。"""
+    from core.market import get_all_tickers, get_market, is_market_trading
 
     config = load_config()
-    feishu = config.get("feishu", {})
     llm = config.get("llm", {})
     db_path = ROOT / "data" / "ratios.db"
+    tickers = get_all_tickers(config)
+    now = datetime.now()
 
-    lines = []
+    service_status = _check_component_status()
+    schema_version = "-"
+    ratio_count = signal_count = llm_count = 0
+    latest_signal = None
+    algo = {
+        "total": len(tickers),
+        "historical_ready": 0,
+        "historical_insufficient": 0,
+        "intraday_ready": 0,
+        "latest_calc": None,
+    }
 
-    # WebSocket
-    pid_file = ROOT / "logs" / "ws_collect.pid"
-    if pid_file.exists():
-        try:
-            pid = int(pid_file.read_text().strip())
-            os.kill(pid, 0)
-            latest = _get_latest_snapshot_time()
-            lines.append(f"**WebSocket:** ✅ PID {pid}, 最近采集 {latest}")
-        except (ValueError, OSError):
-            lines.append("**WebSocket:** ❌ PID 文件存在但进程不存活")
-    else:
-        lines.append("**WebSocket:** ❌ 未运行")
-
-    # LLM
-    llm_model = llm.get('model', '未配置')
-    lines.append(f"**LLM:** ✅ {llm_model}")
-
-    # LLM 调用次数
     if db_path.exists():
         try:
             with sqlite3.connect(db_path, timeout=5) as conn:
-                today = datetime.now().strftime("%Y-%m-%d")
-                row = conn.execute(
+                row = conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
+                schema_version = row[0] if row else "legacy"
+                ratio_count = conn.execute("SELECT COUNT(*) FROM volume_ratios").fetchone()[0]
+                today = now.strftime("%Y-%m-%d")
+                signal_count = conn.execute(
+                    "SELECT COUNT(*) FROM signals WHERE timestamp LIKE ?",
+                    (f"{today}%",)
+                ).fetchone()[0]
+                llm_count = conn.execute(
                     "SELECT COUNT(*) FROM llm_calls WHERE timestamp LIKE ?",
                     (f"{today}%",)
-                ).fetchone()
-                llm_count = row[0] if row else 0
-                lines.append(f"**LLM 调用:** 今日 {llm_count} 次")
+                ).fetchone()[0]
+                latest_signal = conn.execute("""
+                    SELECT ticker, signal_type, source, timestamp
+                    FROM signals
+                    ORDER BY timestamp DESC
+                    LIMIT 1
+                """).fetchone()
+                rows = conn.execute("""
+                    SELECT ticker, MAX(timestamp), historical_ratio, historical_sample_days,
+                           intraday_ratio, historical_signal
+                    FROM volume_ratios
+                    GROUP BY ticker
+                """).fetchall()
+                for ticker, ts, hist_ratio, sample_days, intraday_ratio, hist_signal in rows:
+                    if (sample_days or 0) >= 3 and (hist_ratio or 0) > 0 and not str(hist_signal or "").startswith("样本不足"):
+                        algo["historical_ready"] += 1
+                    else:
+                        algo["historical_insufficient"] += 1
+                    if (intraday_ratio or 0) > 0:
+                        algo["intraday_ready"] += 1
+                    if ts and (algo["latest_calc"] is None or ts > algo["latest_calc"][1]):
+                        algo["latest_calc"] = (ticker, ts, hist_ratio or 0, intraday_ratio or 0)
         except sqlite3.Error:
-            pass
+            schema_version = "读取失败"
 
-    # 数据库
-    if db_path.exists():
-        try:
-            with sqlite3.connect(db_path, timeout=5) as conn:
-                count = conn.execute("SELECT COUNT(*) FROM volume_ratios").fetchone()[0]
-                lines.append(f"**数据库:** {count:,} 条记录")
-        except sqlite3.Error:
-            lines.append("**数据库:** ⚠️ 读取失败")
+    snapshot_summary = _get_snapshot_summary(tickers)
+    snapshot_size = _get_snapshot_size()
+    params = config.get("params", {})
 
-    # 快照
-    snapshot_dir = ROOT / "data" / "snapshots"
-    if snapshot_dir.exists():
-        total_size = sum(f.stat().st_size for f in snapshot_dir.rglob("*") if f.is_file())
-        lines.append(f"**快照:** {total_size // (1024*1024)}MB")
+    lines = [f"**检查时间:** {now.strftime('%Y-%m-%d %H:%M:%S')}", ""]
+
+    lines.append("**服务**")
+    for key, label in [("ws", "WebSocket"), ("bot", "飞书机器人"), ("cron", "Cron"), ("db", "数据库")]:
+        icon, detail = service_status.get(key, ("❓", "未知"))
+        if key == "db":
+            detail = f"schema {schema_version}，量比 {ratio_count:,} 条"
+        lines.append(f"{icon} {label}: {detail}")
+    lines.append(f"✅ LLM: {llm.get('model', '未配置')}，今日调用 {llm_count} 次")
+    lines.append("")
+
+    lines.append("**市场 / 数据新鲜度**")
+    for market, label in [("US", "🇺🇸 US"), ("HK", "🇭🇰 HK"), ("CN", "🇨🇳 CN")]:
+        trading = "交易中" if is_market_trading(market) else "休市"
+        snap = snapshot_summary.get(market)
+        if snap:
+            age = _format_age((now - snap["mtime"]).total_seconds())
+            lines.append(f"{label}: {trading}，最近 {snap['ticker']} {snap['time']}（{age}前）")
+        else:
+            lines.append(f"{label}: {trading}，无快照")
+    lines.append(f"快照占用: {snapshot_size // (1024 * 1024)}MB")
+    lines.append("")
+
+    lines.append("**算法**")
+    lines.append(f"监控标的: {algo['total']} 个")
+    lines.append(f"5日量比可用: {algo['historical_ready']} 个，样本不足: {algo['historical_insufficient']} 个")
+    lines.append(f"日内量比可用: {algo['intraday_ready']} 个")
+    if algo["latest_calc"]:
+        ticker, ts, hist_ratio, intraday_ratio = algo["latest_calc"]
+        calc_time = datetime.fromisoformat(ts).strftime("%H:%M:%S")
+        lines.append(f"最新计算: {ticker} 5日 {hist_ratio:.2f} / 日内 {intraday_ratio:.2f} ({calc_time})")
+    lines.append("")
+
+    lines.append("**信号 / 配置**")
+    if latest_signal:
+        ticker, sig_type, source, ts = latest_signal
+        src_label = "日内+5日" if source == "mixed" else ("日内" if source == "intraday" else "5日")
+        sig_time = datetime.fromisoformat(ts).strftime("%H:%M:%S")
+        lines.append(f"今日信号: {signal_count} 个，最近 {ticker} {sig_type} [{src_label}] {sig_time}")
+    else:
+        lines.append(f"今日信号: {signal_count} 个，最近无信号")
+    lines.append(
+        "参数: "
+        f"历史 {params.get('volume_ratio_window', 5)}日，"
+        f"日内 {params.get('intraday_signal_window_minutes', 5)}m/"
+        f"基线 {params.get('intraday_baseline_minutes', 30)}m/"
+        f"{params.get('intraday_baseline_method', 'mean')}，"
+        f"阈值 H>{params.get('alert_threshold', 2.0)} / I>{params.get('intraday_alert_threshold', 1.5)}"
+    )
 
     return {
         "config": {"wide_screen_mode": True},
-        "header": {"title": {"tag": "plain_text", "content": "📊 系统状态"}},
+        "header": {"title": {"tag": "plain_text", "content": f"📊 量比系统状态 {now.strftime('%H:%M')}"}},
         "elements": [
             {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}}
         ]
     }
+
+
+def _get_snapshot_summary(tickers: list) -> dict:
+    """按市场返回最近 JSONL 快照文件信息。"""
+    snapshot_dir = ROOT / "data" / "snapshots"
+    summary = {}
+    if not snapshot_dir.exists():
+        return summary
+
+    ticker_set = {t.replace(".", "_"): t for t in tickers}
+    for path in snapshot_dir.glob("*/*.jsonl"):
+        stem_parts = path.stem.rsplit("_", 1)
+        if len(stem_parts) != 2:
+            continue
+        ticker_key = stem_parts[0]
+        ticker = ticker_set.get(ticker_key, ticker_key.replace("_", "."))
+        market = path.parent.name
+        try:
+            mtime = datetime.fromtimestamp(path.stat().st_mtime)
+        except OSError:
+            continue
+        current = summary.get(market)
+        if current is None or mtime > current["mtime"]:
+            summary[market] = {
+                "ticker": ticker,
+                "mtime": mtime,
+                "time": mtime.strftime("%H:%M:%S"),
+            }
+    return summary
+
+
+def _get_snapshot_size() -> int:
+    snapshot_dir = ROOT / "data" / "snapshots"
+    if not snapshot_dir.exists():
+        return 0
+    return sum(f.stat().st_size for f in snapshot_dir.rglob("*") if f.is_file())
+
+
+def _format_age(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}秒"
+    if seconds < 3600:
+        return f"{seconds // 60}分钟"
+    return f"{seconds // 3600}小时{(seconds % 3600) // 60}分钟"
 
 
 def build_scan_card() -> dict:
@@ -743,7 +846,7 @@ def handle_command(client: lark.Client, chat_id: str, text: str):
         except Exception as e:
             send_text(client, chat_id, f"关停失败: {e}")
 
-    elif text == "/status":
+    elif text in ("/status", "/statsu"):
         card = build_status_card()
         send_card(client, chat_id, card)
 

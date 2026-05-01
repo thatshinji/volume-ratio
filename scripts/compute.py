@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 ROOT = Path(__file__).parent.parent
 SNAPSHOT_DIR = ROOT / "data" / "snapshots"
 DB_PATH = ROOT / "data" / "ratios.db"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 sys.path.insert(0, str(ROOT / "scripts"))
 
@@ -42,6 +42,8 @@ MIN_HISTORY_SAMPLES = 3
 RATIO_WRITE_INTERVAL = 300
 
 _snapshot_cache = {}
+_minute_bar_cache = {}
+_minute_bar_presence_cache = {}
 _last_ratio_write = {}
 _db_initialized = False
 
@@ -185,8 +187,101 @@ def _to_record(raw: dict, market: str) -> Optional[SnapshotRecord]:
     )
 
 
+def _row_to_record(row: sqlite3.Row) -> Optional[SnapshotRecord]:
+    try:
+        ts = parse_timestamp(row["last_timestamp"])
+        market_ts = parse_timestamp(row["market_timestamp"])
+        if not ts or not market_ts:
+            return None
+        return SnapshotRecord(
+            ticker=row["ticker"],
+            ts=ts,
+            market_ts=market_ts,
+            market_date=date.fromisoformat(row["market_date"]),
+            market_minutes=int(row["market_minute"]),
+            price=float(row["close"] or 0),
+            high=float(row["high"] or row["close"] or 0),
+            low=float(row["low"] or row["close"] or 0),
+            volume=float(row["volume"] or 0),
+            turnover=float(row["turnover"] or 0),
+            change_pct=float(row["change_pct"] or 0),
+        )
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
+def _minute_bar_table_exists(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='quote_minute_bars'"
+    ).fetchone()
+    return row is not None
+
+
+def _ticker_has_minute_bars(ticker: str) -> bool:
+    if ticker in _minute_bar_presence_cache:
+        return _minute_bar_presence_cache[ticker]
+    init_db()
+    try:
+        with sqlite3.connect(get_db_path(), timeout=30) as conn:
+            if not _minute_bar_table_exists(conn):
+                _minute_bar_presence_cache[ticker] = False
+                return False
+            row = conn.execute(
+                "SELECT 1 FROM quote_minute_bars WHERE ticker = ? LIMIT 1",
+                (ticker,),
+            ).fetchone()
+            has_rows = row is not None
+            _minute_bar_presence_cache[ticker] = has_rows
+            return has_rows
+    except sqlite3.Error:
+        return False
+
+
+def read_minute_bars(ticker: str, target_date: date = None) -> list[SnapshotRecord]:
+    """从 SQLite 分钟聚合表读取计算用快照，避免每次扫描全量 JSONL。"""
+    init_db()
+    cache_key = (ticker, target_date.isoformat() if target_date else "*")
+    if cache_key in _minute_bar_cache:
+        return _minute_bar_cache[cache_key]
+
+    params = [ticker]
+    where = "ticker = ?"
+    if target_date:
+        where += " AND market_date = ?"
+        params.append(target_date.isoformat())
+
+    try:
+        with sqlite3.connect(get_db_path(), timeout=30) as conn:
+            conn.row_factory = sqlite3.Row
+            if not _minute_bar_table_exists(conn):
+                _minute_bar_cache[cache_key] = []
+                return []
+            rows = conn.execute(
+                f"""
+                SELECT ticker, last_timestamp, market_timestamp, market_date, market_minute,
+                       close, high, low, volume, turnover, change_pct
+                FROM quote_minute_bars
+                WHERE {where}
+                ORDER BY market_date, market_minute, last_timestamp
+                """,
+                params,
+            ).fetchall()
+    except sqlite3.Error:
+        return []
+
+    records = [rec for row in rows if (rec := _row_to_record(row))]
+    _minute_bar_cache[cache_key] = records
+    if records:
+        _minute_bar_presence_cache[ticker] = True
+    return records
+
+
 def read_market_snapshots(ticker: str, target_date: date = None) -> list[SnapshotRecord]:
-    """读取并清洗指定市场交易日的快照，按市场时间排序去重。"""
+    """读取并清洗指定市场交易日的快照，优先使用 SQLite 分钟聚合。"""
+    minute_records = read_minute_bars(ticker, target_date)
+    if minute_records or _ticker_has_minute_bars(ticker):
+        return minute_records
+
     market = get_market(ticker)
     cache_key = (ticker, target_date.isoformat() if target_date else "*")
     mtimes = tuple((p, p.stat().st_mtime_ns) for p in _snapshot_files(ticker))
@@ -248,6 +343,22 @@ def get_latest_snapshot_info(ticker: str, day: datetime = None) -> Optional[dict
 
 
 def _available_market_dates(ticker: str, before: date = None) -> list[date]:
+    if _ticker_has_minute_bars(ticker):
+        params = [ticker]
+        where = "ticker = ?"
+        if before:
+            where += " AND market_date < ?"
+            params.append(before.isoformat())
+        try:
+            with sqlite3.connect(get_db_path(), timeout=30) as conn:
+                rows = conn.execute(
+                    f"SELECT DISTINCT market_date FROM quote_minute_bars WHERE {where} ORDER BY market_date",
+                    params,
+                ).fetchall()
+            return [date.fromisoformat(row[0]) for row in rows]
+        except (sqlite3.Error, ValueError):
+            pass
+
     dates = sorted({r.market_date for r in read_market_snapshots(ticker)})
     if before:
         dates = [d for d in dates if d < before]
@@ -255,7 +366,7 @@ def _available_market_dates(ticker: str, before: date = None) -> list[date]:
 
 
 def _records_for_date(ticker: str, market_date: date) -> list[SnapshotRecord]:
-    return [r for r in read_market_snapshots(ticker) if r.market_date == market_date]
+    return read_market_snapshots(ticker, market_date)
 
 
 def _cumulative_volume_at(records: list[SnapshotRecord], target_minute: int) -> float:
@@ -510,7 +621,7 @@ def get_db_path() -> Path:
 
 
 def init_db():
-    """初始化 SQLite。schema v2 会清空旧错误口径 volume_ratios/signals。"""
+    """初始化 SQLite。v3 在 v2 基础上无损增加分钟聚合表。"""
     global _db_initialized
     if _db_initialized:
         return
@@ -518,15 +629,30 @@ def init_db():
     db_path = get_db_path()
     with sqlite3.connect(db_path, timeout=30) as conn:
         current_version = _get_schema_version(conn)
-        if current_version != SCHEMA_VERSION:
+        if current_version not in (2, SCHEMA_VERSION):
             conn.execute("DROP TABLE IF EXISTS volume_ratios")
             conn.execute("DROP TABLE IF EXISTS quote_snapshots")
+            conn.execute("DROP TABLE IF EXISTS quote_minute_bars")
             conn.execute("DROP TABLE IF EXISTS signals")
             conn.execute("DROP TABLE IF EXISTS signal_states")
             conn.execute("DROP TABLE IF EXISTS schema_meta")
             conn.execute("CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             conn.execute(
                 "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)",
+                (str(SCHEMA_VERSION),),
+            )
+        elif current_version == 2:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS schema_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+            """)
+            conn.execute(
+                """
+                INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
                 (str(SCHEMA_VERSION),),
             )
 
@@ -548,6 +674,27 @@ def init_db():
                 change_pct REAL,
                 source TEXT DEFAULT 'websocket',
                 UNIQUE(ticker, timestamp, volume, price)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS quote_minute_bars (
+                ticker TEXT NOT NULL,
+                market TEXT NOT NULL,
+                market_date TEXT NOT NULL,
+                market_minute INTEGER NOT NULL,
+                market_timestamp TEXT NOT NULL,
+                first_timestamp TEXT NOT NULL,
+                last_timestamp TEXT NOT NULL,
+                open REAL,
+                high REAL,
+                low REAL,
+                close REAL,
+                volume REAL,
+                turnover REAL,
+                change_pct REAL,
+                source TEXT DEFAULT 'websocket',
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(ticker, market_date, market_minute)
             )
         """)
         conn.execute("""
@@ -610,6 +757,8 @@ def init_db():
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_quote_snapshots_ticker_time ON quote_snapshots(ticker, timestamp)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_quote_snapshots_market_date ON quote_snapshots(market, market_date)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_quote_minute_bars_ticker_date ON quote_minute_bars(ticker, market_date, market_minute)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_quote_minute_bars_market_date ON quote_minute_bars(market, market_date)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_volume_ratios_ticker ON volume_ratios(ticker)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_volume_ratios_timestamp ON volume_ratios(timestamp)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp)")
@@ -626,8 +775,112 @@ def _get_schema_version(conn: sqlite3.Connection) -> int:
         return 0
 
 
+def _as_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _clear_bar_caches(ticker: str):
+    for key in list(_minute_bar_cache.keys()):
+        if key[0] == ticker:
+            del _minute_bar_cache[key]
+    for key in list(_snapshot_cache.keys()):
+        if key[0] == ticker:
+            del _snapshot_cache[key]
+    _minute_bar_presence_cache[ticker] = True
+
+
+def save_quote_minute_bar(
+    ticker: str,
+    data: dict,
+    source: str = "websocket",
+    conn: sqlite3.Connection = None,
+):
+    """保存一分钟一条的累计量快照，供量比计算快速读取。"""
+    market = get_market(ticker)
+    ts = parse_timestamp(data.get("timestamp", ""))
+    if not ts:
+        return
+    market_ts = _to_market_dt(ts, market)
+    if not _is_regular_session(market, market_ts):
+        return
+
+    price = _as_float(data.get("price"))
+    volume = _as_float(data.get("volume"))
+    if price <= 0 or volume < 0:
+        return
+
+    minute_ts = market_ts.replace(second=0, microsecond=0)
+    market_minute = market_ts.hour * 60 + market_ts.minute
+    high = _as_float(data.get("high"), price)
+    low = _as_float(data.get("low"), price)
+    if high <= 0:
+        high = price
+    if low <= 0:
+        low = price
+    now = datetime.now().isoformat()
+    params = (
+        ticker,
+        market,
+        market_ts.date().isoformat(),
+        market_minute,
+        minute_ts.isoformat(),
+        ts.isoformat(),
+        ts.isoformat(),
+        price,
+        high,
+        low,
+        price,
+        volume,
+        _as_float(data.get("turnover")),
+        _as_float(data.get("change_pct")),
+        source,
+        now,
+    )
+
+    def execute(target: sqlite3.Connection):
+        target.execute("""
+            INSERT INTO quote_minute_bars
+            (ticker, market, market_date, market_minute, market_timestamp,
+             first_timestamp, last_timestamp, open, high, low, close, volume,
+             turnover, change_pct, source, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(ticker, market_date, market_minute) DO UPDATE SET
+                last_timestamp = CASE
+                    WHEN excluded.last_timestamp >= quote_minute_bars.last_timestamp
+                    THEN excluded.last_timestamp ELSE quote_minute_bars.last_timestamp END,
+                close = CASE
+                    WHEN excluded.last_timestamp >= quote_minute_bars.last_timestamp
+                    THEN excluded.close ELSE quote_minute_bars.close END,
+                high = MAX(quote_minute_bars.high, excluded.high),
+                low = MIN(quote_minute_bars.low, excluded.low),
+                volume = MAX(quote_minute_bars.volume, excluded.volume),
+                turnover = CASE
+                    WHEN excluded.turnover >= quote_minute_bars.turnover
+                    THEN excluded.turnover ELSE quote_minute_bars.turnover END,
+                change_pct = CASE
+                    WHEN excluded.last_timestamp >= quote_minute_bars.last_timestamp
+                    THEN excluded.change_pct ELSE quote_minute_bars.change_pct END,
+                source = excluded.source,
+                updated_at = excluded.updated_at
+        """, params)
+
+    try:
+        if conn is None:
+            init_db()
+            with sqlite3.connect(get_db_path(), timeout=30) as own_conn:
+                execute(own_conn)
+        else:
+            execute(conn)
+        _clear_bar_caches(ticker)
+    except sqlite3.Error:
+        pass
+
+
 def save_quote_snapshot(ticker: str, data: dict, source: str = "websocket"):
-    """按 WebSocket/REST 返回结构保存原始快照，供后续回放和审计。"""
+    """按 WebSocket/REST 返回结构保存原始快照，并同步更新分钟聚合表。"""
     init_db()
     market = get_market(ticker)
     ts = parse_timestamp(data.get("timestamp", ""))
@@ -655,6 +908,7 @@ def save_quote_snapshot(ticker: str, data: dict, source: str = "websocket"):
                 float(data.get("change_pct", 0) or 0),
                 source,
             ))
+            save_quote_minute_bar(ticker, data, source=source, conn=conn)
     except sqlite3.Error:
         pass
 

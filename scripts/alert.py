@@ -5,6 +5,8 @@ cron 每1分钟扫描，触发信号时通过飞书机器人推送
 """
 
 import json
+import fcntl
+import os
 import sqlite3
 import sys
 import time
@@ -483,84 +485,104 @@ def should_push(ticker: str, new_state: str) -> bool:
 def scan_and_alert():
     """扫描并发送告警，触发信号时调用 LLM 分析（带去重状态机）"""
     from compute import compute_all, save_signal
+    from core.config import load_config
+    from core.market import get_all_tickers, get_market, is_market_trading
 
-    results = compute_all()
-    alerts = detect_signals(results)
+    lock_file = ROOT / "logs" / "alert.lock"
+    lock_file.parent.mkdir(exist_ok=True)
+    with open(lock_file, "w") as lf:
+        try:
+            fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lf.write(str(os.getpid()))
+            lf.flush()
+        except BlockingIOError:
+            print("[alert] 上一次扫描仍在运行，跳过本轮")
+            return
 
-    if not alerts:
-        print(f"[alert] 无触发信号，共扫描 {len(results)} 个标的")
-        return
+        config = load_config()
+        tickers = get_all_tickers(config)
+        active_markets = {get_market(t) for t in tickers}
+        if not any(is_market_trading(market) for market in active_markets):
+            print("[alert] 当前无开盘市场，跳过扫描")
+            return
 
-    print(f"[alert] 检测到 {len(alerts)} 个信号，开始去重判断...")
+        results = compute_all()
+        alerts = detect_signals(results)
 
-    # LLM 调用限制：只对强信号调用，同一 ticker 只调一次
-    seen_tickers = set()
-    pushed_count = 0
+        if not alerts:
+            print(f"[alert] 无触发信号，共扫描 {len(results)} 个标的")
+            return
 
-    for alert in alerts:
-        ticker = alert.get("ticker", "")
-        ratio = alert.get("ratio", 0)
-        signal = alert.get("signal", "")
-        source = alert.get("source", "historical")
+        print(f"[alert] 检测到 {len(alerts)} 个信号，开始去重判断...")
 
-        # 确定信号状态
-        if signal in ("放量止跌", "放量突破", "放量下跌", "缩量止跌"):
-            new_state = signal
-        elif ratio > 2.0:
-            new_state = "放量突破" if alert.get("change_pct", 0) > 0 else "放量下跌"
-        elif ratio > 1.5:
-            new_state = "放量"
-        elif ratio < 0.6:
-            new_state = "缩量"
-        else:
-            new_state = "正常"
+        # LLM 调用限制：只对强信号调用，同一 ticker 只调一次
+        seen_tickers = set()
+        pushed_count = 0
 
-        # 去重判断
-        if not should_push(ticker, new_state):
-            print(f"[alert] {ticker} 状态持续 ({new_state})，跳过推送")
-            continue
+        for alert in alerts:
+            ticker = alert.get("ticker", "")
+            ratio = alert.get("ratio", 0)
+            signal = alert.get("signal", "")
+            source = alert.get("source", "historical")
 
-        # 更新状态
-        update_signal_state(ticker, new_state)
+            # 确定信号状态
+            if signal in ("放量止跌", "放量突破", "放量下跌", "缩量止跌"):
+                new_state = signal
+            elif ratio > 2.0:
+                new_state = "放量突破" if alert.get("change_pct", 0) > 0 else "放量下跌"
+            elif ratio > 1.5:
+                new_state = "放量"
+            elif ratio < 0.6:
+                new_state = "缩量"
+            else:
+                new_state = "正常"
 
-        # 判断是否需要 LLM 分析
-        is_significant = (
-            signal in ("放量突破", "放量下跌") or
-            (ratio > 2.5 and alert.get("change_pct", 0) != 0)
-        )
+            # 去重判断
+            if not should_push(ticker, new_state):
+                print(f"[alert] {ticker} 状态持续 ({new_state})，跳过推送")
+                continue
 
-        if ticker in seen_tickers:
-            analysis = None
-        elif is_significant:
-            avg_vol = alert.get("volume_avg5", 0)
-            analysis = analyze_alert_with_llm(alert, avg_vol)
-            seen_tickers.add(ticker)
-        else:
-            analysis = None
+            # 更新状态
+            update_signal_state(ticker, new_state)
 
-        # 保存信号记录
-        name = alert.get("name", ticker)
-        save_signal(
-            ticker=ticker, name=name, signal_type=new_state,
-            ratio=ratio, price=alert.get("price", 0),
-            change_pct=alert.get("change_pct", 0), source=source,
-            llm_analysis=analysis or "", notified=1,
-        )
+            # 判断是否需要 LLM 分析
+            is_significant = (
+                signal in ("放量突破", "放量下跌") or
+                (ratio > 2.5 and alert.get("change_pct", 0) != 0)
+            )
 
-        # 推送
-        card = format_alert_card(alert, analysis)
-        # 同时打印文本日志
-        ticker = alert["ticker"]
-        name = alert.get("name", ticker)
-        ratio = alert["ratio"]
-        change = alert["change_pct"]
-        direction = "↑" if change > 0 else "↓"
-        print(f"[alert] {ticker}-{name} {direction}{abs(change):.2f}% 量比{ratio:.2f} {alert.get('source','')}")
-        send_feishu_card(card)
-        pushed_count += 1
-        print("---")
+            if ticker in seen_tickers:
+                analysis = None
+            elif is_significant:
+                avg_vol = alert.get("volume_avg5", 0)
+                analysis = analyze_alert_with_llm(alert, avg_vol)
+                seen_tickers.add(ticker)
+            else:
+                analysis = None
 
-    print(f"[alert] 推送完成: {pushed_count}/{len(alerts)} 个信号")
+            # 保存信号记录
+            name = alert.get("name", ticker)
+            save_signal(
+                ticker=ticker, name=name, signal_type=new_state,
+                ratio=ratio, price=alert.get("price", 0),
+                change_pct=alert.get("change_pct", 0), source=source,
+                llm_analysis=analysis or "", notified=1,
+            )
+
+            # 推送
+            card = format_alert_card(alert, analysis)
+            # 同时打印文本日志
+            ticker = alert["ticker"]
+            name = alert.get("name", ticker)
+            ratio = alert["ratio"]
+            change = alert["change_pct"]
+            direction = "↑" if change > 0 else "↓"
+            print(f"[alert] {ticker}-{name} {direction}{abs(change):.2f}% 量比{ratio:.2f} {alert.get('source','')}")
+            send_feishu_card(card)
+            pushed_count += 1
+            print("---")
+
+        print(f"[alert] 推送完成: {pushed_count}/{len(alerts)} 个信号")
 
 
 def send_brief_report():
@@ -569,7 +591,13 @@ def send_brief_report():
     生成持仓组合量比概况，调用 LLM 做整体解读
     """
     from compute import compute_all
-    from core.market import get_market, is_market_trading
+    from core.market import get_all_tickers, get_market, is_market_trading
+
+    config = load_config()
+    active_markets = {get_market(t) for t in get_all_tickers(config)}
+    if not any(is_market_trading(market) for market in active_markets):
+        print("[alert] 简报：当前无开盘市场")
+        return
 
     results = compute_all()
     if not results:

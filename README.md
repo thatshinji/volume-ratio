@@ -12,12 +12,12 @@
 - **多市场覆盖**：美股(US)、港股(HK)、A股(CN) 三大市场
 - **智能信号检测**：放量突破、放量下跌、缩量止跌、尾盘放量等
 - **交易日过滤**：通过 Longbridge trading_days API 按市场和日期过滤历史样本，假期/周末不推送
-- **快照级计算**：量比基于 WebSocket JSONL 快照计算，REST API 仅用于补充最新价格和涨跌幅
+- **分钟级计算**：WebSocket 快照实时聚合为 SQLite 分钟线，量比计算读取分钟聚合表；REST API 仅用于补充最新价格和涨跌幅
 - **LLM 多模型切换**：一键切换 MiniMax / Xiaomi 等模型，自动分析量比异常原因
 - **飞书机器人**：WebSocket 长连接，支持交互指令（/status /scan /signals /brief /watchlist /allstock /sync /start /stop /mute /history）
 - **交互式卡片**：关注列表可删除、全部股票可添加、长桥持仓自动同步
 - **信号去重**：同一标的会合并 5日与日内信号，再用状态机判断是否推送；支持 /mute 静默（自动过期）
-- **JSONL + SQLite 存储**：JSONL 保存可回放行情快照，SQLite 保存 schema v2 量比结果、原始快照索引和信号历史
+- **JSONL + SQLite 存储**：JSONL 保存可回放行情快照，SQLite schema v3 保存分钟聚合、量比结果、原始快照索引和信号历史
 - **中文名标识**：标的显示中文名（如 `CLF.US 克利夫兰`），量比用符号+中文双标识
 
 ### 1.2 系统架构
@@ -37,7 +37,7 @@
 ┌────────────────────────▼────────────────────────────────────┐
 │                    数据层                                    │
 │     snapshots/*.jsonl        │         ratios.db            │
-│  (JSONL行情快照，按天追加)     │ (SQLite量比+快照索引+信号历史) │
+│  (JSONL行情快照，按天追加)     │ (SQLite分钟聚合+量比+信号历史) │
 └────────────────────────┬────────────────────────────────────┘
                          │
 ┌────────────────────────▼────────────────────────────────────┐
@@ -206,7 +206,7 @@ historical_ratio =
 
 当前实现细节：
 
-- 历史样本来自 `data/snapshots/*/*.jsonl`，按市场本地日期和正常交易时段清洗。
+- 历史样本优先来自 `quote_minute_bars` 分钟聚合表；没有完成回填时才降级读取 `data/snapshots/*/*.jsonl`。
 - 过去样本会调用 `is_trading_day_on(market, date)` 过滤非交易日；交易日 API 查询失败时保守放行。
 - 如果当前市场不在交易时段且今天没有快照，会回退到最近一个正常交易快照，用于 CLI/简报展示最近有效状态。
 - `historical_sample_days` 会记录实际使用的历史样本数；样本少于最低门槛时信号显示 `样本不足(x/5)`。
@@ -425,7 +425,7 @@ data/snapshots/US/CLF_US_20260429.jsonl   # 一行一条快照
 
 相比旧方案（每条快照一个 JSON 文件），文件数从 6万+/天 降至每个标的每天一个 JSONL。
 
-当前量比计算只读取 JSONL 快照；旧格式 `.json` 快照不参与新算法，可通过 `cleanup.py --force` 清理。
+JSONL 是可回放原始数据。实时量比计算优先读取 SQLite 的 `quote_minute_bars` 分钟聚合表，避免每分钟扫描几百 MB 文本文件；旧格式 `.json` 快照不参与新算法，可通过 `cleanup.py --force` 清理。
 
 快照字段来自 Longbridge 推送结构：
 
@@ -450,10 +450,11 @@ data/snapshots/US/CLF_US_20260429.jsonl   # 一行一条快照
 
 - `volume_ratios` — 量比实时记录（带 ticker + timestamp 索引）
 - `quote_snapshots` — WebSocket/REST 原始行情快照，字段对齐 `ticker/timestamp/price/open/high/low/volume/turnover/change/change_pct`
+- `quote_minute_bars` — 每 ticker 每市场分钟一行的累计量快照，是 5日历史同期量比和日内滚动量比的主计算数据源
 - `signals` — 信号记录（带 timestamp 索引）
 - `signal_states` — 信号去重状态
 - `llm_calls` — LLM API 调用记录
-- `schema_meta` — 数据库 schema 版本。v2 起旧口径 `volume_ratios/signals/signal_states` 会清空重建，避免错误量比与新算法混用。
+- `schema_meta` — 数据库 schema 版本。v3 起在 v2 基础上无损增加 `quote_minute_bars`，避免 `alert.py` 每分钟全量解析 JSONL。
 
 `volume_ratios` 当前记录两套算法结果：
 
@@ -461,7 +462,7 @@ data/snapshots/US/CLF_US_20260429.jsonl   # 一行一条快照
 - `intraday_ratio`、`intraday_window_volume`、`intraday_baseline_volume`、`intraday_baseline_samples`
 - `historical_signal`、`intraday_signal`、`cond_vol`、`cond_stop`、`cond_stable`
 
-schema v2 初始化时会清空旧口径结果表：
+schema v2 初始化时会清空旧口径结果表；v2 升级到 v3 只新增分钟聚合表，不清空旧数据：
 
 ```text
 DROP TABLE IF EXISTS volume_ratios
@@ -476,6 +477,7 @@ DROP TABLE IF EXISTS signal_states
 `cleanup.py` 自动清理过期数据（各市场收盘后 1 小时触发）：
 - JSONL 快照：20 天
 - quote_snapshots：20 天
+- quote_minute_bars：20 天
 - volume_ratios：20 天
 - signals：20 天
 
@@ -497,7 +499,7 @@ python3 scripts/cleanup.py --dry-run
 - `historical_sample_days` 不足时，5日历史同期量比会显示 `样本不足(x/5)`
 - 当前市场未开盘或没有正常交易时段快照时，日内滚动量比会显示 `休市` 或 `数据不足`
 - 查看 `market_date`、`market_time`、`volume_today`、`volume_avg5` 判断是否取到了正确市场时刻
-- REST API 连接失败只影响最新价格补充，不应影响基于 JSONL 的量比核心计算
+- REST API 连接失败只影响最新价格补充，不应影响基于分钟聚合表的量比核心计算
 
 **Q: 日内滚动量比太敏感**
 - 将 `intraday_alert_threshold` 从 `1.5` 调高到 `2.0`
@@ -505,8 +507,12 @@ python3 scripts/cleanup.py --dry-run
 - 开盘前几分钟基准样本不足时，系统会主动返回 `数据不足`
 
 **Q: 旧 snapshots JSON 文件还有用吗**
-- 新算法只读取 `.jsonl`
+- 新算法优先读取 SQLite 分钟聚合表；`.jsonl` 用于审计、回放和 `backfill_minute_bars.py` 回填
 - 旧 `.json` 文件不再参与计算，可以通过 `python3 scripts/cleanup.py --force` 清理
+
+**Q: JSONL 文件太大导致 alert.py CPU 高怎么办**
+- 运行一次 `python3 scripts/backfill_minute_bars.py`，把现有 JSONL 回填到 `quote_minute_bars`
+- WebSocket 后续会在写入原始快照时同步更新分钟聚合表，正常运行不再需要每分钟扫描全量 JSONL
 
 **Q: 飞书机器人不响应**
 - 检查 `config.yaml` 中 `feishu.app_id` 和 `feishu.app_secret` 是否正确

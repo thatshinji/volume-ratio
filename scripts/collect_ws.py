@@ -9,6 +9,7 @@ Usage:
 """
 
 import argparse
+import fcntl
 import json
 import os
 import queue
@@ -36,8 +37,10 @@ quote_queue = queue.Queue()
 _prev_close_cache = {}  # ticker -> prev_close
 _cache_lock = threading.Lock()
 _quote_count = 0  # 用于定期清理缓存
+_saved_count = 0
 _CACHE_CLEAN_INTERVAL = 1000  # 每处理 1000 条行情清理一次缓存
 _active_tickers = set()  # 最近有行情的 ticker 集合
+_instance_lock_file = None
 
 
 def fetch_prev_close(tickers: list):
@@ -148,6 +151,7 @@ def get_jsonl_path(ticker: str, day: datetime = None) -> Path:
 
 def save_snapshot(ticker: str, data: dict):
     """追加写入 JSONL 文件（一行一条快照）"""
+    global _saved_count
     filepath = get_jsonl_path(ticker)
     line = json.dumps(data, ensure_ascii=False)
     with open(filepath, "a", encoding="utf-8") as f:
@@ -160,7 +164,25 @@ def save_snapshot(ticker: str, data: dict):
     except Exception as e:
         print(f"[ws] DB 快照写入失败: {e}", flush=True)
 
-    print(f"[ws] {ticker} -> {filepath.name}", flush=True)
+    _saved_count += 1
+    if _saved_count % 100 == 0:
+        print(f"[ws] 已写入 {_saved_count} 条快照，最近 {ticker} -> {filepath.name}", flush=True)
+
+
+def acquire_instance_lock() -> bool:
+    """确保只有一个 WebSocket 采集实例运行。"""
+    global _instance_lock_file
+    lock_path = ROOT / "logs" / "ws_collect.lock"
+    lock_path.parent.mkdir(exist_ok=True)
+    _instance_lock_file = open(lock_path, "w")
+    try:
+        fcntl.flock(_instance_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _instance_lock_file.write(str(os.getpid()))
+        _instance_lock_file.flush()
+        return True
+    except BlockingIOError:
+        print("[ws] 已有采集实例运行，当前进程退出", flush=True)
+        return False
 
 
 def get_client_id() -> str:
@@ -281,6 +303,9 @@ if __name__ == "__main__":
         os.dup2(devnull, sys.stdin.fileno())
         os.close(devnull)
 
-        print(f"[ws] 守护进程启动，PID: {os.getpid()}", flush=True)
+    if not acquire_instance_lock():
+        sys.exit(0)
+
+    print(f"[ws] 守护进程启动，PID: {os.getpid()}", flush=True)
 
     run_websocket()
