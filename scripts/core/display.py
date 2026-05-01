@@ -12,18 +12,17 @@ def format_ratio_display(ratio: float) -> str:
     """
     if ratio <= 0:
         return "数据不足"
-    elif ratio > 5.0:
-        return "⬆⬆⬆ 巨量"
-    elif ratio > 2.0:
-        return "⬆⬆  显著放量"
-    elif ratio > 1.2:
-        return "⬆   放量"
-    elif ratio > 0.8:
-        return "─    正常"
-    elif ratio > 0.6:
-        return "⬇   缩量"
-    else:
+    elif ratio < 0.6:
         return "⬇⬇  缩量异常"
+    elif ratio < 0.8:
+        return "⬇   缩量"
+    elif ratio <= 1.2:
+        return "─    正常"
+    elif ratio <= 2.0:
+        return "⬆   放量"
+    elif ratio <= 5.0:
+        return "⬆⬆  显著放量"
+    return "⬆⬆⬆ 巨量"
 
 
 def format_ticker_line(ticker: str, name: str, change_pct: float,

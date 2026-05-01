@@ -24,6 +24,7 @@ DB_PATH = ROOT / "data" / "ratios.db"
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from core.config import load_config
+from core.market import market_now
 
 # 保留天数
 SNAPSHOT_KEEP_DAYS = 20
@@ -45,7 +46,7 @@ def get_et_now() -> datetime:
 
 def is_market_closed(market: str) -> bool:
     """动态判断市场是否已收盘（收盘后 1 小时开始清理）"""
-    now = datetime.now()
+    now = market_now(market)
 
     if market == "CN":
         # A股 15:00 收盘，16:30 后清理
@@ -55,8 +56,7 @@ def is_market_closed(market: str) -> bool:
         return now.hour >= 17
     elif market == "US":
         # 美股 16:00 ET 收盘，17:00 ET 后清理
-        et_now = get_et_now()
-        return et_now.hour >= 17
+        return now.hour >= 17
     return False
 
 

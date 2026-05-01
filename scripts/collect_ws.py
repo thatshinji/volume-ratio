@@ -9,7 +9,9 @@ Usage:
 """
 
 import argparse
+import contextlib
 import fcntl
+import io
 import json
 import os
 import queue
@@ -54,11 +56,11 @@ def fetch_prev_close(tickers: list):
             print("[ws] prev_close 缓存失败: token 目录为空", flush=True)
             return
         cid = files[0].name
-        oauth = OAuthBuilder(cid).build(lambda url: None)
-        config = Config.from_oauth(oauth)
-        ctx = QuoteContext(config)
-
-        quotes = ctx.quote(tickers)
+        with contextlib.redirect_stdout(io.StringIO()):
+            oauth = OAuthBuilder(cid).build(lambda url: None)
+            config = Config.from_oauth(oauth)
+            ctx = QuoteContext(config)
+            quotes = ctx.quote(tickers)
         with _cache_lock:
             for q in quotes:
                 _prev_close_cache[q.symbol] = float(q.prev_close or 0)

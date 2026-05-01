@@ -1026,8 +1026,8 @@ def _fetch_price_from_api(tickers: list) -> dict:
         for q in quotes:
             last = float(q.last_done or 0)
             prev = float(q.prev_close or 0)
-            change_pct = ((last - prev) / prev * 100) if prev > 0 else 0
-            result[q.symbol] = {"price": last, "change_pct": round(change_pct, 2), "volume": int(q.volume or 0)}
+            change_pct = round((last - prev) / prev * 100, 2) if prev > 0 else None
+            result[q.symbol] = {"price": last, "change_pct": change_pct, "volume": int(q.volume or 0)}
         return result
     except Exception as e:
         print(f"[compute] API 价格获取失败: {e}", flush=True)
@@ -1050,7 +1050,8 @@ def compute_ticker(ticker: str, api_data: dict = None, api_vol_data: dict = None
         api_data = _fetch_price_from_api([ticker])
     if ticker in api_data:
         price = api_data[ticker]["price"] or price
-        change_pct = api_data[ticker]["change_pct"]
+        if api_data[ticker].get("change_pct") is not None:
+            change_pct = api_data[ticker]["change_pct"]
 
     signal = historical["signal"]
     if not is_trading_day(market):

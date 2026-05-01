@@ -408,6 +408,7 @@ def build_signals_card() -> dict:
     table_rows = []
     for ticker, name, sig_type, ratio, price, change, source, ts in rows:
         name = name or ticker
+        change = float(change or 0)
         direction = "↑" if change > 0 else ("↓" if change < 0 else "─")
         dt = datetime.fromisoformat(ts).strftime("%H:%M")
         ratio_display = format_ratio_display(ratio or 0)
@@ -784,9 +785,29 @@ def _check_component_status() -> dict:
 
     status = {}
 
+    def locked_pid(lock_path: Path, pid_path: Path) -> str:
+        if not lock_path.exists():
+            return ""
+        try:
+            with open(lock_path, "r+") as lock_file:
+                try:
+                    fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(lock_file, fcntl.LOCK_UN)
+                    return ""
+                except BlockingIOError:
+                    pid_text = lock_file.read().strip()
+                    if pid_text:
+                        pid_path.write_text(pid_text)
+                    return pid_text
+        except OSError:
+            return ""
+
     # WebSocket 采集
     ws_pid_file = ROOT / "logs" / "ws_collect.pid"
-    if ws_pid_file.exists():
+    ws_lock_pid = locked_pid(ROOT / "logs" / "ws_collect.lock", ws_pid_file)
+    if ws_lock_pid:
+        status["ws"] = ("✅", f"运行中 (PID {ws_lock_pid})")
+    elif ws_pid_file.exists():
         try:
             pid = int(ws_pid_file.read_text().strip())
             os.kill(pid, 0)
@@ -798,7 +819,10 @@ def _check_component_status() -> dict:
 
     # 飞书机器人
     bot_pid_file = ROOT / "logs" / "feishu_bot.pid"
-    if bot_pid_file.exists():
+    bot_lock_pid = locked_pid(ROOT / "logs" / "feishu_bot.lock", bot_pid_file)
+    if bot_lock_pid:
+        status["bot"] = ("✅", f"运行中 (PID {bot_lock_pid})")
+    elif bot_pid_file.exists():
         try:
             pid = int(bot_pid_file.read_text().strip())
             os.kill(pid, 0)

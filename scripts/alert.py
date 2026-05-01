@@ -106,7 +106,7 @@ def detect_signals(results: List[dict]) -> List[dict]:
         name = r.get("name", ticker)
         ratio = r.get("ratio", 0)
         ratio_intraday = r.get("ratio_intraday", 0)
-        change_pct = r.get("change_pct", 0)
+        change_pct = float(r.get("change_pct") or 0)
         signal = r.get("signal", "")
         signal_detail = r.get("signal_detail", "")
         data_quality = r.get("data_quality", "")
@@ -245,7 +245,7 @@ def format_alert_card(alert: dict, analysis: Optional[str] = None) -> dict:
     ratio = alert["ratio"]
     historical_ratio = alert.get("historical_ratio", 0)
     intraday_ratio = alert.get("intraday_ratio", 0)
-    change = alert["change_pct"]
+    change = float(alert.get("change_pct") or 0)
     price = alert["price"]
     signals = ", ".join(alert["triggered_signals"]) or alert["signal_detail"] or alert["signal"]
     source = alert.get("source", "historical")
@@ -395,7 +395,6 @@ SIGNAL_PRIORITY = {
     "正常": 0,
     "缩量": 1,
     "放量": 2,
-    "温放": 2,
     "放量突破": 3,
     "放量下跌": 3,
     "放量止跌": 3,
@@ -572,8 +571,8 @@ def scan_and_alert():
             ticker = alert["ticker"]
             name = alert.get("name", ticker)
             ratio = alert["ratio"]
-            change = alert["change_pct"]
-            direction = "↑" if change > 0 else "↓"
+            change = float(alert.get("change_pct") or 0)
+            direction = "↑" if change > 0 else ("↓" if change < 0 else "─")
             print(f"[alert] {ticker}-{name} {direction}{abs(change):.2f}% 量比{ratio:.2f} {alert.get('source','')}")
             send_feishu_card(card)
             pushed_count += 1

@@ -232,8 +232,9 @@ def cmd_history(ticker: str):
 
     for ts, ratio, price, change, signal, today_vol, avg_vol, sample_days in rows:
         dt = datetime.fromisoformat(ts)
-        direction = "↑" if change > 0 else "↓"
-        print(f"{dt.strftime('%m-%d %H:%M'):<20} {ratio or 0:>6.2f} {price or 0:>10.2f} {direction}{abs(change or 0):>6.2f}% {sample_days or 0:>6} {signal or '-':<10}")
+        change = float(change or 0)
+        direction = "↑" if change > 0 else ("↓" if change < 0 else "─")
+        print(f"{dt.strftime('%m-%d %H:%M'):<20} {ratio or 0:>6.2f} {price or 0:>10.2f} {direction}{abs(change):>6.2f}% {sample_days or 0:>6} {signal or '-':<10}")
 
     print(f"\n共 {len(rows)} 条记录")
 
@@ -267,7 +268,8 @@ def cmd_signals():
     print(f"=== 今日信号 ({today}) ===")
     for ticker, name, sig_type, ratio, price, change, source, ts in rows:
         name = name or ticker
-        direction = "↑" if change > 0 else "↓"
+        change = float(change or 0)
+        direction = "↑" if change > 0 else ("↓" if change < 0 else "─")
         dt = datetime.fromisoformat(ts).strftime("%H:%M:%S")
         ratio_display = format_ratio_display(ratio or 0)
         src_label = "日内+5日" if source == "mixed" else ("日内" if source == "intraday" else "5日")
