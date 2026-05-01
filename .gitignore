@@ -19,3 +19,13 @@ data/snapshots/
 
 # OS
 .DS_Store
+
+# Node
+node_modules/
+dist/
+
+# Rust / Tauri
+src-tauri/target/
+
+# Notifications queue
+data/notifications.jsonl

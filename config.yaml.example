@@ -64,12 +64,21 @@ llm_profiles:
     api_key: "YOUR_XIAOMI_API_KEY"
 
 # ------------------------------------------------------------
-# 四、飞书配置
+# 四、飞书配置（可选）
 # ------------------------------------------------------------
+# 配置后可同时通过飞书接收告警通知（桌面客户端 + 飞书双通道）
+# 不配置则仅通过桌面客户端接收通知，不影响正常使用
 # 方式一：自建应用（推荐，支持交互指令和富文本卡片）
-feishu:
-  app_id: "YOUR_APP_ID"
-  app_secret: "YOUR_APP_SECRET"
-  chat_id: "YOUR_CHAT_ID"  # 机器人会话 chat_id，从机器人日志中获取
-  # webhook_url 保留作为备用（自建应用模式下可选）
-  # webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/YOUR_WEBHOOK_TOKEN"
+# feishu:
+#   app_id: "YOUR_APP_ID"
+#   app_secret: "YOUR_APP_SECRET"
+#   chat_id: "YOUR_CHAT_ID"
+#   # webhook_url 保留作为备用（自建应用模式下可选）
+#   # webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/YOUR_WEBHOOK_TOKEN"
+
+# ------------------------------------------------------------
+# 五、桌面客户端 API 配置
+# ------------------------------------------------------------
+api:
+  host: "127.0.0.1"    # API 监听地址（仅本地访问）
+  port: 9720            # API 端口

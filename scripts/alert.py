@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from core.config import load_config
 from core.market import get_ticker_name
 from core.display import format_ratio_display, format_ticker_line
+from notification_queue import push_notification, push_brief
 
 
 # === 信号规则 ===
@@ -583,7 +584,16 @@ def scan_and_alert():
         change = float(alert.get("change_pct") or 0)
         direction = "↑" if change > 0 else ("↓" if change < 0 else "─")
         print(f"[alert] {ticker}-{name} {direction}{abs(change):.2f}% 量比{ratio:.2f} {source}")
-        send_feishu_card(card)
+
+        # 通道1: 桌面客户端通知（始终推送）
+        alert["_analysis"] = analysis
+        push_notification(alert)
+
+        # 通道2: 飞书通知（可选，仅在配置了飞书时推送）
+        feishu_cfg = config.get("feishu", {})
+        if feishu_cfg and feishu_cfg.get("app_id"):
+            send_feishu_card(card)
+
         pushed_count += 1
         print("---")
 
@@ -647,7 +657,14 @@ def send_brief_report():
     }
 
     print(f"[alert] 简报发送: {len(sorted_results)} 个标的")
-    send_feishu_card(card)
+
+    # 通道1: 桌面客户端通知
+    push_brief(brief_text, analysis)
+
+    # 通道2: 飞书通知（可选）
+    feishu_cfg = config.get("feishu", {})
+    if feishu_cfg and feishu_cfg.get("app_id"):
+        send_feishu_card(card)
 
 
 if __name__ == "__main__":

@@ -618,4 +618,116 @@ dependencies = [
 
 ---
 
+## 十一、macOS 桌面客户端
+
+基于 Tauri v2 的原生 macOS 桌面应用，提供可视化界面替代飞书机器人交互。
+
+### 11.1 功能特性
+
+- **Dashboard**：实时扫描所有标的，按市场分组展示量比、价格、涨跌幅
+- **Signals**：今日信号列表，支持趋势图表、静默、AI 分析
+- **Watchlist**：管理监控标的，一键同步长桥持仓
+- **Settings**：API Key 配置、算法参数调整、LLM 模型切换、飞书配置
+- **实时告警**：WebSocket 推送 + macOS 原生通知
+- **双通道**：桌面通知 + 飞书卡片（可选）
+
+### 11.2 安装
+
+从 [GitHub Releases](../../releases) 下载最新的 `.dmg` 文件，拖入 Applications 即可。
+
+### 11.3 从源码构建
+
+```bash
+# 前置依赖
+brew install rust node python@3.12
+
+# 克隆仓库
+git clone https://github.com/yourname/volume-ratio.git
+cd volume-ratio
+
+# 安装前端依赖
+npm install
+
+# 安装 Python 依赖
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt  # 或 pip install pyyaml requests longbridge lark-oapi fastapi uvicorn websockets
+
+# 开发模式
+cargo tauri dev
+
+# 构建 DMG
+cargo tauri build
+```
+
+### 11.4 项目结构（桌面客户端部分）
+
+```
+volume-ratio/
+├── src/                      # React 前端
+│   ├── App.tsx               # 主路由 + WebSocket 告警监听
+│   ├── components/
+│   │   ├── Dashboard.tsx     # 市场总览 + 扫描表格
+│   │   ├── SignalList.tsx    # 信号列表 + 趋势图
+│   │   ├── RatioChart.tsx    # TradingView 图表
+│   │   ├── Watchlist.tsx     # 关注列表管理
+│   │   └── Settings.tsx      # 系统配置（API Key/参数/LLM/飞书）
+│   ├── hooks/
+│   │   └── useWebSocket.ts   # WebSocket 自动重连 hook
+│   └── lib/
+│       ├── api.ts            # Tauri HTTP 代理客户端
+│       ├── types.ts          # TypeScript 类型定义
+│       └── notifications.ts  # macOS 原生通知封装
+│
+├── src-tauri/                # Rust 后端
+│   ├── src/
+│   │   ├── lib.rs            # Tauri 入口 + 告警 WebSocket 监听
+│   │   ├── commands.rs       # HTTP 代理命令
+│   │   └── python_manager.py # Python 子进程管理
+│   ├── Cargo.toml            # Rust 依赖
+│   └── tauri.conf.json       # Tauri 配置
+│
+└── scripts/
+    └── api_server.py         # FastAPI HTTP + WebSocket API 服务
+```
+
+### 11.5 API 服务
+
+桌面客户端通过内嵌的 Python API 服务（`api_server.py`）与后端通信：
+
+| 端点 | 方法 | 功能 |
+|:--|:--|:--|
+| `/api/health` | GET | 健康检查 |
+| `/api/scan` | POST | 扫描所有标的 |
+| `/api/signals` | GET | 今日信号 |
+| `/api/signals/ratios/{ticker}` | GET | 量比历史 |
+| `/api/watchlist` | GET/POST/DELETE | 关注列表管理 |
+| `/api/watchlist/sync` | POST | 同步长桥持仓 |
+| `/api/mute` | POST | 静默标的 |
+| `/api/analyze` | POST | AI 分析 |
+| `/api/brief` | POST | AI 简报 |
+| `/api/config` | GET | 读取配置 |
+| `/api/config/params` | PUT | 更新算法参数 |
+| `/api/config/llm` | PUT | 更新 LLM 配置 |
+| `/api/config/llm/switch` | PUT | 切换 LLM 模型 |
+| `/api/config/longbridge` | PUT | 更新 Longbridge API Key |
+| `/api/config/feishu` | PUT | 更新飞书配置 |
+| `/api/status` | GET | 系统状态 |
+| `/ws/alerts` | WebSocket | 实时告警推送 |
+| `/ws/quotes` | WebSocket | 实时行情推送 |
+
+### 11.6 发布
+
+```bash
+# 打 tag 触发 GitHub Actions 自动构建
+git tag v0.1.0
+git push origin v0.1.0
+
+# 或手动构建
+cargo tauri build
+# 输出：src-tauri/target/release/bundle/dmg/*.dmg
+```
+
+---
+
 > 维护者：shinji | 技术支持：Claude Code + Longbridge OpenAPI

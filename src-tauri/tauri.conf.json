@@ -1,0 +1,47 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nickelpack/tauri-v2-docs/main/tauri.conf.json",
+  "productName": "Volume Ratio Monitor",
+  "version": "0.1.0",
+  "identifier": "com.volume-ratio.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Volume Ratio Monitor",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "dmg": {
+        "appPosition": { "x": 180, "y": 170 },
+        "applicationFolderPosition": { "x": 480, "y": 170 },
+        "windowSize": { "width": 660, "height": 400 }
+      }
+    },
+    "category": "Finance",
+    "shortDescription": "Cross-market volume ratio monitor",
+    "longDescription": "A lightweight macOS desktop app for monitoring volume ratio anomalies across US, HK, and CN stock markets. Features real-time alerts, AI analysis, and Longbridge integration."
+  }
+}
