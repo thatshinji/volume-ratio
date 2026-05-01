@@ -179,7 +179,10 @@ def build_status_card() -> dict:
     service_status = _check_component_status()
     schema_version = "-"
     ratio_count = signal_count = llm_count = 0
-    db_size = db_path.stat().st_size if db_path.exists() else 0
+    try:
+        db_size = db_path.stat().st_size if db_path.exists() else 0
+    except OSError:
+        db_size = 0
     latest_signal = None
     algo = {
         "total": len(tickers),
@@ -326,7 +329,15 @@ def _get_snapshot_size() -> int:
     snapshot_dir = ROOT / "data" / "snapshots"
     if not snapshot_dir.exists():
         return 0
-    return sum(f.stat().st_size for f in snapshot_dir.rglob("*") if f.is_file())
+    total = 0
+    for f in snapshot_dir.rglob("*"):
+        if not f.is_file():
+            continue
+        try:
+            total += f.stat().st_size
+        except OSError:
+            continue
+    return total
 
 
 def _format_age(seconds: float) -> str:
@@ -936,8 +947,7 @@ def run_service_command_async(
 
 
 def handle_command(client: lark.Client, chat_id: str, text: str):
-    """处理用户指令"""
-    text = text.strip()
+    """处理用户指令（调用方已 strip）"""
     print(f"[bot] 收到指令: {text}", flush=True)
 
     if text == "/start":

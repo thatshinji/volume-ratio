@@ -199,8 +199,16 @@ def cmd_status():
     # 快照存储
     snapshot_dir = ROOT / "data" / "snapshots"
     if snapshot_dir.exists():
-        total_size = sum(f.stat().st_size for f in snapshot_dir.rglob("*") if f.is_file())
-        file_count = len(list(snapshot_dir.rglob("*")))
+        total_size = 0
+        file_count = 0
+        for f in snapshot_dir.rglob("*"):
+            if not f.is_file():
+                continue
+            try:
+                total_size += f.stat().st_size
+            except OSError:
+                continue
+            file_count += 1
         warn = " ⚠️ 接近上限" if total_size >= SNAPSHOT_MAX_BYTES * 0.8 else ""
         print(f"  快照文件:  {file_count} 个 ({format_size(total_size)} / {format_size(SNAPSHOT_MAX_BYTES)}){warn}")
     else:
