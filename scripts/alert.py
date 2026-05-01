@@ -134,6 +134,8 @@ def detect_signals(results: List[dict]) -> List[dict]:
                 "signal_detail": signal_detail,
                 "triggered_signals": triggered,
                 "source": "historical",
+                "volume_avg5": r.get("volume_avg5", 0),
+                "historical_sample_days": r.get("historical_sample_days", 0),
             })
 
         # === Intraday 路径（滚动量比 + 三条件）===
@@ -154,8 +156,10 @@ def detect_signals(results: List[dict]) -> List[dict]:
                 "signal_detail": f"放量={cond_vol} 止跌={cond_stop} 企稳={cond_stable}",
                 "triggered_signals": ["放量止跌"],
                 "source": "intraday",
+                "volume_avg5": r.get("volume_avg5", 0),
+                "historical_sample_days": r.get("historical_sample_days", 0),
             })
-        elif signal_intraday == "放量" and ratio_intraday > 1.5:
+        elif signal_intraday == "放量":
             alerts.append({
                 "ticker": ticker,
                 "name": name,
@@ -166,6 +170,8 @@ def detect_signals(results: List[dict]) -> List[dict]:
                 "signal_detail": f"放量={cond_vol} 止跌={cond_stop} 企稳={cond_stable}",
                 "triggered_signals": ["放量"],
                 "source": "intraday",
+                "volume_avg5": r.get("volume_avg5", 0),
+                "historical_sample_days": r.get("historical_sample_days", 0),
             })
 
     # 保存配置（仅在移除过期 mute 时）
@@ -176,13 +182,47 @@ def detect_signals(results: List[dict]) -> List[dict]:
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             yaml.dump(config, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
 
-    # 按 ticker 去重：同一 ticker 保留 intraday 优先
+    # 按 ticker 合并：同一 ticker 同时保留 historical 和 intraday 信息
     seen = {}
     for alert in alerts:
         ticker = alert["ticker"]
-        if ticker not in seen or alert.get("source") == "intraday":
+        if ticker not in seen:
             seen[ticker] = alert
+        else:
+            seen[ticker] = merge_alerts(seen[ticker], alert)
     return list(seen.values())
+
+
+def merge_alerts(existing: dict, incoming: dict) -> dict:
+    """合并同一 ticker 的多路径信号，避免 intraday 覆盖 historical 细节。"""
+    merged = dict(existing)
+    sources = []
+    for source in (existing.get("source"), incoming.get("source")):
+        if source and source not in sources:
+            sources.append(source)
+    merged["source"] = "mixed" if len(sources) > 1 else (sources[0] if sources else "")
+    merged["sources"] = sources
+
+    triggered = []
+    for item in existing.get("triggered_signals", []) + incoming.get("triggered_signals", []):
+        if item and item not in triggered:
+            triggered.append(item)
+    merged["triggered_signals"] = triggered
+
+    details = []
+    for detail in (existing.get("signal_detail", ""), incoming.get("signal_detail", "")):
+        if detail and detail not in details:
+            details.append(detail)
+    merged["signal_detail"] = " / ".join(details)
+
+    # 用优先级最高的信号作为状态机主信号，但保留所有 triggered_signals 用于展示。
+    candidates = [existing.get("signal", ""), incoming.get("signal", "")] + triggered
+    merged["signal"] = max(candidates, key=lambda s: SIGNAL_PRIORITY.get(s, 0)) if candidates else existing.get("signal", "")
+
+    # 卡片主量比取更强的一路；历史均量等辅助字段保留已有值。
+    if incoming.get("ratio", 0) > existing.get("ratio", 0):
+        merged["ratio"] = incoming.get("ratio", 0)
+    return merged
 
 
 def format_alert_card(alert: dict, analysis: Optional[str] = None) -> dict:
@@ -197,7 +237,7 @@ def format_alert_card(alert: dict, analysis: Optional[str] = None) -> dict:
 
     direction = "↑" if change > 0 else "↓"
     ratio_display = format_ratio_display(ratio)
-    type_label = "日内" if source == "intraday" else "5日"
+    type_label = "日内+5日" if source == "mixed" else ("日内" if source == "intraday" else "5日")
     # 信号显示加方向（如"放量 ↑" 或 "缩量 ↓"）
     signal_name = alert["signal_detail"] or alert["signal"]
     if signal_name in ("放量", "缩量", "放量突破", "放量下跌", "缩量止跌", "尾盘放量"):

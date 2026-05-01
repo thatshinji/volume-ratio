@@ -8,16 +8,16 @@
 
 ### 1.1 核心能力
 
-- **双量比引擎**：同时运行日内滚动量比（立即生效）和5日历史量比（需要数据积累）
+- **双量比引擎**：同时运行5日历史同期量比（主量比）和日内滚动量比（短线异动）
 - **多市场覆盖**：美股(US)、港股(HK)、A股(CN) 三大市场
 - **智能信号检测**：放量突破、放量下跌、缩量止跌、尾盘放量等
-- **假期自动检测**：通过 Longbridge trading_days API 判断交易日，假期/周末不推送
-- **REST API 数据源**：量比计算使用 Longbridge REST API（K-line 历史数据 + 实时行情），数据准确可靠
+- **交易日过滤**：通过 Longbridge trading_days API 按市场和日期过滤历史样本，假期/周末不推送
+- **快照级计算**：量比基于 WebSocket JSONL 快照计算，REST API 仅用于补充最新价格和涨跌幅
 - **LLM 多模型切换**：一键切换 MiniMax / Xiaomi 等模型，自动分析量比异常原因
 - **飞书机器人**：WebSocket 长连接，支持交互指令（/status /scan /signals /brief /watchlist /allstock /sync /start /stop /mute /history）
 - **交互式卡片**：关注列表可删除、全部股票可添加、长桥持仓自动同步
-- **信号去重**：状态机模型，状态变化时推送，状态持续时静默，状态升级时再推送；支持 /mute 静默（自动过期）
-- **JSONL 存储**：每日每标的一个 JSONL 文件，6万+文件/天 → 11文件/天
+- **信号去重**：同一标的会合并 5日与日内信号，再用状态机判断是否推送；支持 /mute 静默（自动过期）
+- **JSONL + SQLite 存储**：JSONL 保存可回放行情快照，SQLite 保存 schema v2 量比结果、原始快照索引和信号历史
 - **中文名标识**：标的显示中文名（如 `CLF.US 克利夫兰`），量比用符号+中文双标识
 
 ### 1.2 系统架构
@@ -37,7 +37,7 @@
 ┌────────────────────────▼────────────────────────────────────┐
 │                    数据层                                    │
 │     snapshots/*.jsonl        │         ratios.db            │
-│   (JSONL行情快照，按天追加)    │    (SQLite量比+信号历史)      │
+│  (JSONL行情快照，按天追加)     │ (SQLite量比+快照索引+信号历史) │
 └────────────────────────┬────────────────────────────────────┘
                          │
 ┌────────────────────────▼────────────────────────────────────┐
@@ -57,7 +57,7 @@
 cd /Users/shinji/project-x/volume-ratio
 python3 -m venv .venv
 source .venv/bin/activate
-pip install pyyaml requests longbridge lark-oapi pytz
+pip install pyyaml requests longbridge lark-oapi
 ```
 
 ### 2.2 配置文件
@@ -81,6 +81,13 @@ watchlist:
     - 1810.HK-小米集团
   cn:
     - 601899.SH-紫金矿业
+
+params:
+  volume_ratio_window: 5              # 历史同期量比：过去 N 个交易日
+  intraday_signal_window_minutes: 5   # 日内滚动量比：最近 W 分钟
+  intraday_baseline_minutes: 30       # 日内滚动量比：前 B 分钟基线
+  intraday_baseline_method: mean      # mean / median
+  intraday_alert_threshold: 1.5
 
 llm:
   provider: "xiaomi"
@@ -138,7 +145,7 @@ volume-ratio/
 │   │   ├── US/              #   CLF_US_20260429.jsonl
 │   │   ├── HK/              #   1810_HK_20260429.jsonl
 │   │   └── CN/              #   601899_SH_20260429.jsonl
-│   └── ratios.db            # SQLite 数据库（量比+信号历史）
+│   └── ratios.db            # SQLite 数据库（量比+快照索引+信号历史）
 │
 └── logs/                    # 运行日志
 ```
@@ -149,29 +156,121 @@ volume-ratio/
 
 ### 4.1 什么是量比
 
-量比 = 当前时段成交量 / 历史同期平均成交量
+量比用于衡量“当前成交强度”相对基准是否异常。系统区分两类口径：
+
+- **5日历史同期量比**：今天到当前市场时刻的成交量，相对过去5个交易日同一市场时刻的平均成交量。
+- **日内滚动量比**：最近几分钟成交量，相对今天前一段时间的常态成交量。
+
+二者用途不同：5日历史同期量比适合作为主展示指标，判断今天整体是否放量；日内滚动量比适合作为短线异动信号，判断刚刚是否突然加速。
 
 | 量比范围 | 符号 | 信号 | 含义 |
 |:--:|:--:|:--|:--|
 | > 5.0 | ⬆⬆⬆ | 巨量 | 重大事件 |
-| 2.0 - 5.0 | ⬆⬆ | 放量 | 突破或出货信号 |
-| 1.5 - 2.0 | ⬆ | 温放 | 有资金关注 |
-| 0.8 - 1.5 | ─ | 正常 | 正常交易活跃度 |
-| 0.5 - 0.8 | ⬇ | 缩量 | 无人关注 |
-| < 0.5 | ⬇⬇ | 地量 | 流动性极低 |
+| 2.0 - 5.0 | ⬆⬆ | 显著放量 | 突破或出货信号 |
+| 1.2 - 2.0 | ⬆ | 放量 | 有资金关注 |
+| 0.8 - 1.2 | ─ | 正常 | 正常交易活跃度 |
+| 0.6 - 0.8 | ⬇ | 缩量 | 无人关注 |
+| < 0.6 | ⬇⬇ | 缩量异常 | 流动性极低或交易冷清 |
 
 ### 4.2 双量比系统
 
 本系统同时运行两套量比计算逻辑：
 
-#### 日内滚动量比（立即生效）
-- **原理**：今日最近N分钟成交量 vs 今日最近基线窗口成交量
-- **优势**：今天就能用，不需要历史数据
+#### 5日历史同期量比（主量比）
 
-#### 5日历史量比（需要数据积累）
-- **原理**：今日同时段成交量 vs 过去5日同一时段平均成交量
-- **优势**：消除日内节律（开盘放量/尾盘缩量）
-- **局限**：需要至少5个交易日数据才能生效
+用于回答：**今天截至当前时刻，成交是否明显强于过去同一时间？**
+
+推荐公式：
+
+```text
+historical_ratio =
+今日开盘至当前市场时刻累计成交量
+/
+过去5个交易日开盘至同一市场时刻累计成交量的平均值
+```
+
+示例：A股当前是 10:35，则比较：
+
+```text
+今日 09:30-10:35 成交量
+/
+过去5个交易日各自 09:30-10:35 成交量均值
+```
+
+特点：
+
+- **优势**：能消除开盘、午盘、尾盘等日内节律影响。
+- **局限**：至少需要若干个历史交易日数据，样本越少越不稳定。
+- **关键约束**：必须使用市场本地时间，且历史样本必须是交易日，不是自然日。
+- **适用场景**：`/scan`、`/brief`、主量比排序、全天放量/缩量判断。
+
+当前实现细节：
+
+- 历史样本来自 `data/snapshots/*/*.jsonl`，按市场本地日期和正常交易时段清洗。
+- 过去样本会调用 `is_trading_day_on(market, date)` 过滤非交易日；交易日 API 查询失败时保守放行。
+- 如果当前市场不在交易时段且今天没有快照，会回退到最近一个正常交易快照，用于 CLI/简报展示最近有效状态。
+- `historical_sample_days` 会记录实际使用的历史样本数；样本少于最低门槛时信号显示 `样本不足(x/5)`。
+
+#### 日内滚动量比（短线异动）
+
+用于回答：**刚刚这几分钟，是否相对今天前面突然放量？**
+
+推荐公式：
+
+```text
+intraday_ratio =
+最近 W 分钟成交量
+/
+今天前 B 分钟内每 W 分钟成交量的均值或中位数
+```
+
+示例：`W=5`、`B=30`，当前是 10:35，则比较：
+
+```text
+今日 10:30-10:35 成交量
+/
+今日 10:00-10:30 内每5分钟成交量的均值或中位数
+```
+
+特点：
+
+- **优势**：当天即可生效，不依赖历史数据，对突然放量敏感。
+- **局限**：只和今天自己比，不能完全消除开盘/尾盘天然放量。
+- **建议**：用中位数或截尾均值做基准，降低单笔异常成交的干扰。
+- **适用场景**：放量止跌、突然放量、短线异动推送。
+
+当前实现细节：
+
+- 默认 `W=5`、`B=30`，即最近5分钟对比前30分钟内每5分钟成交量。
+- 基准方法由 `intraday_baseline_method` 控制，支持 `mean` 或 `median`。
+- 当前市场日期不是交易日时直接返回 `休市`，不会用昨天数据冒充今天日内信号。
+- 基准窗口必须有足够有效样本；样本不足时返回 `数据不足`。
+- 日内推送阈值来自 `intraday_alert_threshold`，避免在告警层硬编码。
+
+### 4.3 计算实现约束
+
+为了保证两套量比可信，成交量计算需要满足以下约束：
+
+- **成交量口径**：如果数据源提供的是当日累计 `volume`，窗口成交量应使用 `当前累计量 - 窗口起点累计量`。
+- **市场时间**：US 使用美东时间，HK 使用香港时间，CN 使用北京时间；不能用服务器自然日直接切分美股交易日。
+- **交易日样本**：5日历史量比应取过去5个交易日，遇到周末和假期要继续向前补足。
+- **假期过滤**：历史样本按具体日期调用交易日检测；日内算法遇到休市直接返回 `休市`。
+- **快照清洗**：计算前应按 timestamp 排序、去重，并处理累计 volume 回落、跨日重置、盘前盘后混入等情况。
+- **午休/跨段交易**：A股和港股午休不应被当成连续交易窗口；窗口差分需要跳过非交易时段。
+- **REST 定位**：REST 最新行情只修正价格/涨跌幅，标准量比不使用日 K 全日量替代历史同期量。
+
+推荐组合判断：
+
+```text
+historical_ratio > 2.0
+表示今天整体显著放量
+
+intraday_ratio > 1.5
+表示刚刚出现短线放量
+
+historical_ratio > 1.5 且 intraday_ratio > 1.5
+表示全天活跃度偏高，且当前正在加速
+```
 
 ---
 
@@ -324,21 +423,59 @@ tail -f logs/alert.log
 data/snapshots/US/CLF_US_20260429.jsonl   # 一行一条快照
 ```
 
-相比旧方案（每条快照一个 JSON 文件），文件数从 6万+/天 降至 11个/天。
+相比旧方案（每条快照一个 JSON 文件），文件数从 6万+/天 降至每个标的每天一个 JSONL。
+
+当前量比计算只读取 JSONL 快照；旧格式 `.json` 快照不参与新算法，可通过 `cleanup.py --force` 清理。
+
+快照字段来自 Longbridge 推送结构：
+
+```json
+{
+  "ticker": "CLF.US",
+  "timestamp": "2026-05-01T21:30:01",
+  "price": 10.31,
+  "open": 10.34,
+  "high": 10.35,
+  "low": 10.25,
+  "volume": 1234567,
+  "turnover": 12345678.9,
+  "change": 0.06,
+  "change_pct": 0.59
+}
+```
 
 ### 8.2 SQLite 数据库
 
 `data/ratios.db` 包含以下表：
 
 - `volume_ratios` — 量比实时记录（带 ticker + timestamp 索引）
+- `quote_snapshots` — WebSocket/REST 原始行情快照，字段对齐 `ticker/timestamp/price/open/high/low/volume/turnover/change/change_pct`
 - `signals` — 信号记录（带 timestamp 索引）
 - `signal_states` — 信号去重状态
 - `llm_calls` — LLM API 调用记录
+- `schema_meta` — 数据库 schema 版本。v2 起旧口径 `volume_ratios/signals/signal_states` 会清空重建，避免错误量比与新算法混用。
+
+`volume_ratios` 当前记录两套算法结果：
+
+- `historical_ratio`、`historical_today_volume`、`historical_avg_volume`、`historical_sample_days`
+- `intraday_ratio`、`intraday_window_volume`、`intraday_baseline_volume`、`intraday_baseline_samples`
+- `historical_signal`、`intraday_signal`、`cond_vol`、`cond_stop`、`cond_stable`
+
+schema v2 初始化时会清空旧口径结果表：
+
+```text
+DROP TABLE IF EXISTS volume_ratios
+DROP TABLE IF EXISTS signals
+DROP TABLE IF EXISTS signal_states
+```
+
+`llm_calls` 会保留，因为它不是量比结果数据。
 
 ### 8.3 数据清理
 
 `cleanup.py` 自动清理过期数据（各市场收盘后 1 小时触发）：
 - JSONL 快照：20 天
+- quote_snapshots：20 天
 - volume_ratios：20 天
 - signals：20 天
 
@@ -357,8 +494,19 @@ python3 scripts/cleanup.py --dry-run
 ### 9.1 常见问题
 
 **Q: 量比显示 0.0 "数据不足"**
-- 5日历史量比需要5个交易日数据才生效
-- 查看 `ratio_intraday` 日内滚动量比，今天就能用
+- `historical_sample_days` 不足时，5日历史同期量比会显示 `样本不足(x/5)`
+- 当前市场未开盘或没有正常交易时段快照时，日内滚动量比会显示 `休市` 或 `数据不足`
+- 查看 `market_date`、`market_time`、`volume_today`、`volume_avg5` 判断是否取到了正确市场时刻
+- REST API 连接失败只影响最新价格补充，不应影响基于 JSONL 的量比核心计算
+
+**Q: 日内滚动量比太敏感**
+- 将 `intraday_alert_threshold` 从 `1.5` 调高到 `2.0`
+- 或将 `intraday_baseline_method` 从 `mean` 改为 `median`
+- 开盘前几分钟基准样本不足时，系统会主动返回 `数据不足`
+
+**Q: 旧 snapshots JSON 文件还有用吗**
+- 新算法只读取 `.jsonl`
+- 旧 `.json` 文件不再参与计算，可以通过 `python3 scripts/cleanup.py --force` 清理
 
 **Q: 飞书机器人不响应**
 - 检查 `config.yaml` 中 `feishu.app_id` 和 `feishu.app_secret` 是否正确
@@ -397,13 +545,12 @@ logs/
 ```toml
 # pyproject.toml
 [project]
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 dependencies = [
     "pyyaml",
     "requests",
     "longbridge>=2.0.0",
     "lark-oapi>=1.0.0",
-    "pytz",
 ]
 ```
 
@@ -419,6 +566,7 @@ dependencies = [
 | v3.1 | 2026-04-29 | 迭代v2：/watchlist 交互删除、/allstock 二级导航、长桥持仓同步、卡片回调、WebSocket 重试、daemon 修复 |
 | v3.2 | 2026-04-30 | US 股票量比修复、信号卡片涨跌方向、should_push 状态推送逻辑 |
 | v3.3 | 2026-05-01 | 量比数据源切换 REST API、假期检测（trading_days API）、数据库索引优化、代码审查缺陷修复（FD double-close / 竞态条件 / PID 锁 / mute 过期等 8 项） |
+| v3.4 | 2026-05-01 | 重写量比算法：5日历史同期量比 + 日内滚动量比；新增 schema v2、交易日按日期过滤、休市保护、日内基准样本门槛 |
 
 ---
 

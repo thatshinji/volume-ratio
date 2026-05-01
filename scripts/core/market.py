@@ -9,15 +9,17 @@ from .config import parse_ticker
 
 # 交易日缓存: {market: (date_fetched, trading_days_set)}
 _trading_days_cache = {}
+# 指定区间交易日缓存: {(market, start, end): trading_days_set}
+_trading_days_range_cache = {}
+# 交易日查找缓存: {market: (start, end, trading_days_set)}
+_trading_days_lookup_cache = {}
 
 
-def _check_trading_days(market: str) -> set:
-    """查询交易日集合（每天只查一次）"""
-    today = date.today()
-    if market in _trading_days_cache:
-        cached_date, cached_data = _trading_days_cache[market]
-        if cached_date == today:
-            return cached_data
+def _fetch_trading_days(market: str, start: date, end: date) -> set:
+    """查询指定日期区间内的交易日集合。"""
+    cache_key = (market, start, end)
+    if cache_key in _trading_days_range_cache:
+        return _trading_days_range_cache[cache_key]
     try:
         import io, os, sys
         from longbridge.openapi import OAuthBuilder, Config, QuoteContext, Market
@@ -40,8 +42,6 @@ def _check_trading_days(market: str) -> set:
             market_enum = getattr(Market, market, None)
             if market_enum is None:
                 return set()
-            end = today + timedelta(days=1)
-            start = end - timedelta(days=10)
             result = ctx.trading_days(market_enum, start, end)
         except Exception:
             return set()
@@ -51,10 +51,24 @@ def _check_trading_days(market: str) -> set:
             os.close(old_stdout_fd)
 
         days = set(result.trading_days)
-        _trading_days_cache[market] = (today, days)
+        _trading_days_range_cache[cache_key] = days
         return days
     except Exception:
         return set()
+
+
+def _check_trading_days(market: str) -> set:
+    """查询交易日集合（每天只查一次）"""
+    today = date.today()
+    if market in _trading_days_cache:
+        cached_date, cached_data = _trading_days_cache[market]
+        if cached_date == today:
+            return cached_data
+    end = today + timedelta(days=1)
+    start = end - timedelta(days=10)
+    days = _fetch_trading_days(market, start, end)
+    _trading_days_cache[market] = (today, days)
+    return days
 
 
 def _is_trading_day(market: str) -> bool:
@@ -63,6 +77,28 @@ def _is_trading_day(market: str) -> bool:
     if not trading_days:
         return True  # 查询失败时默认交易日
     return date.today() in trading_days
+
+
+def is_trading_day_on(market: str, target_date: date) -> bool:
+    """判断指定日期是否为交易日；查询失败时保守放行。
+
+    为历史量比循环优化：一次拉宽窗口，后续同市场日期命中内存缓存。
+    """
+    cached = _trading_days_lookup_cache.get(market)
+    if cached:
+        start, end, cached_days = cached
+        if start <= target_date <= end:
+            if not cached_days:
+                return True
+            return target_date in cached_days
+
+    start = target_date - timedelta(days=30)
+    end = target_date + timedelta(days=5)
+    trading_days = _fetch_trading_days(market, start, end)
+    _trading_days_lookup_cache[market] = (start, end, trading_days)
+    if not trading_days:
+        return True
+    return target_date in trading_days
 
 
 def is_market_trading(market: str) -> bool:

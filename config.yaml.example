@@ -30,7 +30,11 @@ watchlist:
 # 二、系统参数
 # ------------------------------------------------------------
 params:
-  volume_ratio_window: 5
+  volume_ratio_window: 5              # 历史同期量比：过去 N 个交易日
+  intraday_signal_window_minutes: 5   # 日内滚动量比：最近 W 分钟
+  intraday_baseline_minutes: 30       # 日内滚动量比：前 B 分钟基线
+  intraday_baseline_method: mean      # mean / median
+  intraday_alert_threshold: 1.5
   snapshot_interval: 60
   alert_threshold: 2.0
   shrink_threshold: 0.6

@@ -154,6 +154,12 @@ def save_snapshot(ticker: str, data: dict):
         f.write(line + "\n")
         f.flush()
 
+    try:
+        from compute import save_quote_snapshot
+        save_quote_snapshot(ticker, data, source="websocket")
+    except Exception as e:
+        print(f"[ws] DB 快照写入失败: {e}", flush=True)
+
     print(f"[ws] {ticker} -> {filepath.name}", flush=True)
 
 

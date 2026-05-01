@@ -212,7 +212,8 @@ def cmd_history(ticker: str):
     try:
         with sqlite3.connect(db_path, timeout=10) as conn:
             rows = conn.execute("""
-                SELECT timestamp, ratio, price, change_pct, signal
+                SELECT timestamp, historical_ratio, price, change_pct, historical_signal,
+                       historical_today_volume, historical_avg_volume, historical_sample_days
                 FROM volume_ratios
                 WHERE ticker = ? AND timestamp > ?
                 ORDER BY timestamp
@@ -226,13 +227,13 @@ def cmd_history(ticker: str):
         return
 
     print(f"=== {ticker} {name} 近 7 日量比趋势 ===")
-    print(f"{'时间':<20} {'量比':>6} {'价格':>10} {'涨跌':>8} {'信号':<10}")
-    print("-" * 60)
+    print(f"{'时间':<20} {'量比':>6} {'价格':>10} {'涨跌':>8} {'样本':>6} {'信号':<10}")
+    print("-" * 72)
 
-    for ts, ratio, price, change, signal in rows:
+    for ts, ratio, price, change, signal, today_vol, avg_vol, sample_days in rows:
         dt = datetime.fromisoformat(ts)
         direction = "↑" if change > 0 else "↓"
-        print(f"{dt.strftime('%m-%d %H:%M'):<20} {ratio:>6.2f} {price:>10.2f} {direction}{abs(change):>6.2f}% {signal or '-':<10}")
+        print(f"{dt.strftime('%m-%d %H:%M'):<20} {ratio or 0:>6.2f} {price or 0:>10.2f} {direction}{abs(change or 0):>6.2f}% {sample_days or 0:>6} {signal or '-':<10}")
 
     print(f"\n共 {len(rows)} 条记录")
 

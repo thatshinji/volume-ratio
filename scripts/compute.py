@@ -1,56 +1,132 @@
 #!/usr/bin/env python3
 """
-量比计算引擎 - 计算实时量比并判断信号
-量比 = 最近N分钟真实成交量 / 过去5日同一时段均量
-盘中量比 = (当前累计量 - N分钟前累计量) / 历史同期差分量均值
+量比计算引擎。
+
+historical_ratio = 今日开盘至当前市场时刻累计成交量 / 过去 N 个交易日同一市场时刻累计成交量均值
+intraday_ratio = 最近 W 分钟成交量 / 今天前 B 分钟内每 W 分钟成交量的均值
 """
 
 import json
 import os
 import sqlite3
 import sys
-from datetime import datetime, timedelta, date
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
+from statistics import mean, median
 from typing import Optional, List
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).parent.parent
 SNAPSHOT_DIR = ROOT / "data" / "snapshots"
 DB_PATH = ROOT / "data" / "ratios.db"
+SCHEMA_VERSION = 2
 
-# 将 scripts/ 加入 sys.path
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from core.config import load_config
 from core.market import get_market, get_all_tickers, get_ticker_name, is_market_trading
-from core.market import _is_trading_day as is_trading_day
+from core.market import _is_trading_day as is_trading_day, is_trading_day_on
+
+MARKET_TZ = {
+    "CN": ZoneInfo("Asia/Shanghai"),
+    "HK": ZoneInfo("Asia/Hong_Kong"),
+    "US": ZoneInfo("America/New_York"),
+}
+LOCAL_TZ = datetime.now().astimezone().tzinfo
+
+DEFAULT_HISTORY_DAYS = 5
+INTRADAY_SIGNAL_WINDOW_MINUTES = 5
+INTRADAY_BASELINE_MINUTES = 30
+MIN_HISTORY_SAMPLES = 3
+RATIO_WRITE_INTERVAL = 300
+
+_snapshot_cache = {}
+_last_ratio_write = {}
+_db_initialized = False
+
+
+@dataclass
+class SnapshotRecord:
+    ticker: str
+    ts: datetime
+    market_ts: datetime
+    market_date: date
+    market_minutes: int
+    price: float
+    high: float
+    low: float
+    volume: float
+    turnover: float
+    change_pct: float
 
 
 def parse_timestamp(ts: str) -> Optional[datetime]:
-    """解析 ISO timestamp 为 datetime 对象"""
+    """解析 ISO timestamp。JSONL 中的 naive 时间按本机时区处理。"""
     if not ts:
         return None
     try:
-        return datetime.fromisoformat(ts.replace('Z', '+00:00'))
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except (ValueError, AttributeError):
         return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=LOCAL_TZ)
+    return dt
+
+
+def _market_tz(market: str) -> ZoneInfo:
+    return MARKET_TZ.get(market, MARKET_TZ["US"])
+
+
+def _to_market_dt(dt: datetime, market: str) -> datetime:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=LOCAL_TZ)
+    return dt.astimezone(_market_tz(market))
+
+
+def _minutes(t: time) -> int:
+    return t.hour * 60 + t.minute
+
+
+def _market_sessions(market: str) -> list[tuple[int, int]]:
+    if market == "CN":
+        return [(_minutes(time(9, 30)), _minutes(time(11, 30))), (_minutes(time(13, 0)), _minutes(time(15, 0)))]
+    if market == "HK":
+        return [(_minutes(time(9, 30)), _minutes(time(12, 0))), (_minutes(time(13, 0)), _minutes(time(16, 0)))]
+    return [(_minutes(time(9, 30)), _minutes(time(16, 0)))]
+
+
+def _is_regular_session(market: str, market_dt: datetime) -> bool:
+    minute = market_dt.hour * 60 + market_dt.minute
+    return any(start <= minute <= end for start, end in _market_sessions(market))
+
+
+def _session_start_minutes(market: str, minute: int) -> int:
+    sessions = _market_sessions(market)
+    for start, end in sessions:
+        if start <= minute <= end:
+            return start
+    return sessions[0][0]
+
+
+def _is_same_or_before_market_time(record: SnapshotRecord, target_minute: int) -> bool:
+    return record.market_minutes <= target_minute
 
 
 def get_jsonl_path(ticker: str, day: datetime = None) -> Path:
-    """获取 JSONL 文件路径"""
+    """获取旧本地日期 JSONL 路径。保留给采集和兼容调用使用。"""
     if day is None:
         day = datetime.now()
     market = get_market(ticker)
-    market_dir = SNAPSHOT_DIR / market
     day_str = day.strftime("%Y%m%d")
     filename = f"{ticker.replace('.', '_')}_{day_str}.jsonl"
-    return market_dir / filename
+    return SNAPSHOT_DIR / market / filename
 
 
 def read_snapshots(ticker: str, day: datetime = None) -> List[dict]:
-    """从 JSONL 文件读取指定日期的所有快照数据"""
+    """读取指定本地日期 JSONL。新量比计算使用 read_market_snapshots()。"""
     if day is None:
         day = datetime.now()
-
     jsonl_path = get_jsonl_path(ticker, day)
     if not jsonl_path.exists():
         return []
@@ -71,182 +147,361 @@ def read_snapshots(ticker: str, day: datetime = None) -> List[dict]:
     return records
 
 
-def get_latest_snapshot_info(ticker: str, day: datetime = None) -> Optional[dict]:
-    """获取指定日期最新的快照数据"""
-    records = read_snapshots(ticker, day)
-    return records[-1] if records else None
+def _snapshot_files(ticker: str) -> list[Path]:
+    market = get_market(ticker)
+    market_dir = SNAPSHOT_DIR / market
+    if not market_dir.exists():
+        return []
+    prefix = ticker.replace(".", "_")
+    return sorted(market_dir.glob(f"{prefix}_*.jsonl"))
 
 
-def get_snapshot_n_minutes_ago(ticker: str, day: datetime, n: int = 5) -> Optional[dict]:
-    """
-    获取指定日期 n 分钟前的快照
-    用于计算 interval volume = latest - n_minutes_ago
-    """
-    records = read_snapshots(ticker, day)
-    if not records:
+def _to_record(raw: dict, market: str) -> Optional[SnapshotRecord]:
+    ts = parse_timestamp(raw.get("timestamp", ""))
+    if not ts:
         return None
+    market_ts = _to_market_dt(ts, market)
+    if not _is_regular_session(market, market_ts):
+        return None
+    try:
+        price = float(raw.get("price", 0) or 0)
+        volume = float(raw.get("volume", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    if price <= 0 or volume < 0:
+        return None
+    return SnapshotRecord(
+        ticker=raw.get("ticker", ""),
+        ts=ts,
+        market_ts=market_ts,
+        market_date=market_ts.date(),
+        market_minutes=market_ts.hour * 60 + market_ts.minute,
+        price=price,
+        high=float(raw.get("high", 0) or 0),
+        low=float(raw.get("low", 0) or 0),
+        volume=volume,
+        turnover=float(raw.get("turnover", 0) or 0),
+        change_pct=float(raw.get("change_pct", 0) or 0),
+    )
 
-    target_time = day - timedelta(minutes=n)
+
+def read_market_snapshots(ticker: str, target_date: date = None) -> list[SnapshotRecord]:
+    """读取并清洗指定市场交易日的快照，按市场时间排序去重。"""
+    market = get_market(ticker)
+    cache_key = (ticker, target_date.isoformat() if target_date else "*")
+    mtimes = tuple((p, p.stat().st_mtime_ns) for p in _snapshot_files(ticker))
+    cached = _snapshot_cache.get(cache_key)
+    if cached and cached[0] == mtimes:
+        return cached[1]
+
+    records = []
+    seen = set()
+    for path in _snapshot_files(ticker):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        raw = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    rec = _to_record(raw, market)
+                    if not rec:
+                        continue
+                    if target_date and rec.market_date != target_date:
+                        continue
+                    key = (rec.ts.isoformat(), rec.price, rec.volume)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    records.append(rec)
+        except OSError:
+            continue
+
+    records.sort(key=lambda r: r.market_ts)
+    _snapshot_cache[cache_key] = (mtimes, records)
+    return records
+
+
+def get_latest_snapshot_info(ticker: str, day: datetime = None) -> Optional[dict]:
+    """获取最近正常交易时段快照。"""
+    market = get_market(ticker)
+    records = read_market_snapshots(ticker)
+    if not records:
+        raw = read_snapshots(ticker, day)[-1:] if read_snapshots(ticker, day) else []
+        return raw[0] if raw else None
+    latest = records[-1]
+    return {
+        "ticker": ticker,
+        "timestamp": latest.ts.isoformat(),
+        "price": latest.price,
+        "high": latest.high,
+        "low": latest.low,
+        "volume": latest.volume,
+        "turnover": latest.turnover,
+        "change_pct": latest.change_pct,
+        "market": market,
+        "market_time": latest.market_ts.isoformat(),
+    }
+
+
+def _available_market_dates(ticker: str, before: date = None) -> list[date]:
+    dates = sorted({r.market_date for r in read_market_snapshots(ticker)})
+    if before:
+        dates = [d for d in dates if d < before]
+    return dates
+
+
+def _records_for_date(ticker: str, market_date: date) -> list[SnapshotRecord]:
+    return [r for r in read_market_snapshots(ticker) if r.market_date == market_date]
+
+
+def _cumulative_volume_at(records: list[SnapshotRecord], target_minute: int) -> float:
+    """取截至目标市场分钟的最大累计量，抵抗重复和小幅 volume 回落。"""
+    vols = [r.volume for r in records if _is_same_or_before_market_time(r, target_minute)]
+    return max(vols) if vols else 0.0
+
+
+def _price_at(records: list[SnapshotRecord], target_minute: int) -> Optional[SnapshotRecord]:
     best = None
-    for data in records:
-        ts = parse_timestamp(data.get("timestamp", ""))
-        if ts and ts <= target_time:
-            best = data
-        elif ts and ts > target_time:
+    for rec in records:
+        if rec.market_minutes <= target_minute:
+            best = rec
+        else:
             break
-
     return best
 
 
-def get_interval_volume(ticker: str, day: datetime, window_minutes: int = 5) -> float:
+def _window_volume(records: list[SnapshotRecord], end_minute: int, window_minutes: int) -> float:
+    market = get_market(records[0].ticker) if records and records[0].ticker else "US"
+    session_start = _session_start_minutes(market, end_minute)
+    start_minute = max(session_start, end_minute - window_minutes)
+    end_vol = _cumulative_volume_at(records, end_minute)
+    start_vol = _cumulative_volume_at(records, start_minute)
+    return max(0.0, end_vol - start_vol)
+
+
+def get_signal(ratio: float, current_time: datetime = None) -> str:
+    """根据历史同期量比范围判断信号。"""
+    if ratio <= 0:
+        return "数据不足"
+    if ratio < 0.6:
+        return "缩量异常"
+    if ratio < 0.8:
+        return "缩量"
+    if ratio <= 1.2:
+        return "正常"
+    if ratio <= 2.0:
+        return "放量"
+    if ratio <= 5.0:
+        return "显著放量"
+    return "巨量"
+
+
+def calc_volume_ratio(ticker: str, current_time: datetime = None, api_vol_data: dict = None) -> tuple:
     """
-    计算指定日期指定时间窗口内的真实成交量（差分量）
-    interval_vol = 最新快照累计量 - window_minutes 前的快照累计量
+    5日历史同期量比。
+    返回: (ratio, today_cumulative_volume, historical_avg_volume, signal)
     """
-    latest = get_latest_snapshot_info(ticker, day)
-    if not latest:
-        return 0.0
-
-    ago = get_snapshot_n_minutes_ago(ticker, day, window_minutes)
-    if not ago:
-        return 0.0
-
-    latest_vol = float(latest.get("volume", 0))
-    ago_vol = float(ago.get("volume", 0))
-
-    return max(0.0, latest_vol - ago_vol)
+    detail = calc_historical_ratio_detail(ticker, current_time)
+    return detail["ratio"], detail["today_volume"], detail["avg_volume"], detail["signal"]
 
 
-def get_last_day_volume(ticker: str, day: datetime) -> float:
-    """获取指定日期 JSONL 最后一条快照的 volume（累计量）"""
-    records = read_snapshots(ticker, day)
-    if not records:
-        return 0.0
-    return float(records[-1].get("volume", 0))
-
-
-# 历史日成交量缓存: {(ticker, date_str): volume}
-_historical_vol_cache = {}
-# K 线数据日缓存: {ticker: (date_fetched, api_vol_data)}
-_kline_daily_cache = {}
-
-
-def _fetch_historical_volumes(tickers: list, days: int = 7) -> dict:
-    """批量获取历史日成交量（通过 Longbridge K 线 API，每天只查一次）"""
-    if not tickers:
-        return {}
-
-    today = date.today()
-    # 检查缓存：所有 ticker 都有今日缓存则直接返回
-    result = {}
-    uncached_tickers = []
-    for ticker in tickers:
-        if ticker in _kline_daily_cache and _kline_daily_cache[ticker][0] == today:
-            result.update(_kline_daily_cache[ticker][1])
-        else:
-            uncached_tickers.append(ticker)
-    if not uncached_tickers:
-        return result
-    tickers = uncached_tickers
-    try:
-        import io
-        from longbridge.openapi import OAuthBuilder, Config, QuoteContext, Period, AdjustType
-        token_dir = Path.home() / ".longbridge" / "openapi" / "tokens"
-        files = list(token_dir.iterdir())
-        if not files:
-            return {}
-        cid = files[0].name
-
-        old_stdout_fd = os.dup(1)
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(devnull, 1)
-        os.close(devnull)
-        old_stdout = sys.stdout
-        sys.stdout = io.StringIO()
-        try:
-            oauth = OAuthBuilder(cid).build(lambda url: None)
-            config = Config.from_oauth(oauth)
-            ctx = QuoteContext(config)
-        except Exception:
-            raise
-        finally:
-            sys.stdout = old_stdout
-            os.dup2(old_stdout_fd, 1)
-            os.close(old_stdout_fd)
-
-        end = date.today()
-        start = end - timedelta(days=days + 5)  # 多取几天，跳过非交易日
-
-        result = {}
-        for ticker in tickers:
-            try:
-                old_stdout_fd = os.dup(1)
-                devnull = os.open(os.devnull, os.O_WRONLY)
-                os.dup2(devnull, 1)
-                os.close(devnull)
-                old_stdout = sys.stdout
-                sys.stdout = io.StringIO()
-                try:
-                    cs = ctx.history_candlesticks_by_date(
-                        ticker, Period.Day, AdjustType.NoAdjust, start, end
-                    )
-                except Exception:
-                    continue
-                finally:
-                    sys.stdout = old_stdout
-                    os.dup2(old_stdout_fd, 1)
-                    os.close(old_stdout_fd)
-
-                ticker_data = {}
-                for c in cs:
-                    # c.timestamp 格式: "2026-04-30 12:00:00" 或 "2026-04-30 00:00:00"
-                    day_str = str(c.timestamp)[:10].replace("-", "")
-                    vol = int(c.volume)
-                    ticker_data[(ticker, day_str)] = vol
-                result.update(ticker_data)
-                _kline_daily_cache[ticker] = (today, ticker_data)
-            except Exception:
-                continue
-
-        return result
-    except Exception as e:
-        print(f"[compute] 历史成交量获取失败: {e}", flush=True)
-        return {}
-
-
-def get_historical_day_volume(ticker: str, day: datetime, api_vol_data: dict = None) -> float:
-    """获取指定日期的真实日成交量（优先用 API K 线数据）"""
-    day_str = day.strftime("%Y%m%d")
-
-    # 1. 优先用传入的 API 数据
-    if api_vol_data and (ticker, day_str) in api_vol_data:
-        return float(api_vol_data[(ticker, day_str)])
-
-    # 2. 检查缓存
-    if (ticker, day_str) in _historical_vol_cache:
-        return _historical_vol_cache[(ticker, day_str)]
-
-    # 3. 回退到 JSONL 计算（最后一条快照的累计量 = 全天量）
-    records = read_snapshots(ticker, day)
-    if not records:
-        return 0.0
-    return float(records[-1].get("volume", 0))
-
-
-def get_today_volume(ticker: str, current_time: datetime = None) -> float:
-    """获取今日同时段真实成交量（差分量）"""
+def calc_historical_ratio_detail(ticker: str, current_time: datetime = None) -> dict:
     if current_time is None:
         current_time = datetime.now()
 
     config = load_config()
-    window = config.get("params", {}).get("volume_ratio_window", 5)
+    window = int(config.get("params", {}).get("volume_ratio_window", DEFAULT_HISTORY_DAYS))
+    market = get_market(ticker)
+    market_dt = _to_market_dt(current_time, market)
+    market_date = market_dt.date()
+    target_minute = market_dt.hour * 60 + market_dt.minute
+    current_date_is_trading = is_trading_day_on(market, market_date)
 
-    return get_interval_volume(ticker, current_time, window)
+    today_records = _records_for_date(ticker, market_date)
+    if not today_records and (not current_date_is_trading or not _is_regular_session(market, market_dt)):
+        all_records = read_market_snapshots(ticker)
+        if all_records:
+            latest = all_records[-1]
+            market_date = latest.market_date
+            market_dt = latest.market_ts
+            target_minute = latest.market_minutes
+            today_records = _records_for_date(ticker, market_date)
+
+    if today_records:
+        latest_today = today_records[-1]
+        if not _is_regular_session(market, market_dt):
+            target_minute = latest_today.market_minutes
+            market_dt = latest_today.market_ts
+        today_volume = _cumulative_volume_at(today_records, target_minute)
+    else:
+        today_volume = 0.0
+
+    past_vols = []
+    past_dates = _available_market_dates(ticker, before=market_date)
+    for past_date in reversed(past_dates):
+        if not is_trading_day_on(market, past_date):
+            continue
+        vol = _cumulative_volume_at(_records_for_date(ticker, past_date), target_minute)
+        if vol > 0:
+            past_vols.append(vol)
+        if len(past_vols) >= window:
+            break
+
+    avg_volume = mean(past_vols) if past_vols else 0.0
+    ratio = today_volume / avg_volume if avg_volume > 0 else 0.0
+    signal = get_signal(ratio)
+    if len(past_vols) < min(MIN_HISTORY_SAMPLES, window):
+        signal = f"样本不足({len(past_vols)}/{window})"
+
+    return {
+        "ratio": round(ratio, 4),
+        "today_volume": today_volume,
+        "avg_volume": avg_volume,
+        "signal": signal,
+        "sample_days": len(past_vols),
+        "market_date": market_date.isoformat(),
+        "market_time": market_dt.strftime("%H:%M"),
+        "target_minute": target_minute,
+        "quality": "ok" if today_volume > 0 and past_vols else "数据不足",
+    }
 
 
-def get_day_volume(ticker: str, day: datetime, api_vol_data: dict = None) -> float:
-    """获取指定日期的真实成交量（优先用 API K 线数据）"""
-    return get_historical_day_volume(ticker, day, api_vol_data)
+def calc_intraday_ratio(ticker: str, current_time: datetime = None) -> tuple:
+    """
+    日内滚动量比：最近 W 分钟 vs 今天前 B 分钟每 W 分钟均量。
+    返回: (ratio, signal_name, cond_vol, cond_stop, cond_stable)
+    """
+    detail = calc_intraday_ratio_detail(ticker, current_time)
+    return (
+        detail["ratio"],
+        detail["signal"],
+        detail["cond_vol"],
+        detail["cond_stop"],
+        detail["cond_stable"],
+    )
+
+
+def calc_intraday_ratio_detail(ticker: str, current_time: datetime = None) -> dict:
+    if current_time is None:
+        current_time = datetime.now()
+
+    config = load_config()
+    params = config.get("params", {})
+    signal_window = int(params.get("intraday_signal_window_minutes", INTRADAY_SIGNAL_WINDOW_MINUTES))
+    baseline_minutes = int(params.get("intraday_baseline_minutes", INTRADAY_BASELINE_MINUTES))
+    baseline_method = params.get("intraday_baseline_method", "mean")
+
+    market = get_market(ticker)
+    market_dt = _to_market_dt(current_time, market)
+    market_date = market_dt.date()
+    target_minute = market_dt.hour * 60 + market_dt.minute
+    current_date_is_trading = is_trading_day_on(market, market_date)
+    if not current_date_is_trading:
+        return _empty_intraday_detail("休市")
+
+    records = _records_for_date(ticker, market_date)
+    if not records and not _is_regular_session(market, market_dt):
+        all_records = read_market_snapshots(ticker)
+        if all_records:
+            latest = all_records[-1]
+            market_date = latest.market_date
+            market_dt = latest.market_ts
+            target_minute = latest.market_minutes
+            records = _records_for_date(ticker, market_date)
+    if not records:
+        return _empty_intraday_detail("数据不足")
+
+    if not _is_regular_session(market, market_dt):
+        target_minute = records[-1].market_minutes
+
+    session_start = _session_start_minutes(market, target_minute)
+    if target_minute - session_start < signal_window + signal_window:
+        return _empty_intraday_detail("数据不足")
+
+    signal_volume = _window_volume(records, target_minute, signal_window)
+    baseline_end = target_minute - signal_window
+    baseline_start = max(session_start, baseline_end - baseline_minutes)
+    baseline_vols = []
+    cursor = baseline_start + signal_window
+    while cursor <= baseline_end:
+        vol = _window_volume(records, cursor, signal_window)
+        if vol > 0:
+            baseline_vols.append(vol)
+        cursor += signal_window
+
+    expected_baseline_samples = max(1, (baseline_end - baseline_start) // signal_window)
+    min_baseline_samples = max(2, min(3, expected_baseline_samples))
+    if signal_volume <= 0 or len(baseline_vols) < min_baseline_samples:
+        return _empty_intraday_detail("数据不足", signal_volume=signal_volume)
+
+    baseline_volume = median(baseline_vols) if baseline_method == "median" else mean(baseline_vols)
+    ratio = signal_volume / baseline_volume if baseline_volume > 0 else 0.0
+    cond_vol = ratio > float(params.get("intraday_alert_threshold", 1.5))
+
+    signal_recs = [r for r in records if target_minute - signal_window <= r.market_minutes <= target_minute]
+    baseline_recs = [r for r in records if baseline_start <= r.market_minutes < baseline_end]
+    cond_stop = False
+    cond_stable = False
+    if signal_recs and baseline_recs:
+        base_low = min((r.low or r.price) for r in baseline_recs if (r.low or r.price) > 0)
+        sig_low = min((r.low or r.price) for r in signal_recs if (r.low or r.price) > 0)
+        latest_price = signal_recs[-1].price
+        cond_stop = sig_low >= base_low * 0.995
+        cond_stable = latest_price > sig_low * 1.005
+
+    if cond_vol and cond_stop and cond_stable:
+        signal = "放量止跌"
+    elif cond_vol:
+        signal = "放量"
+    else:
+        signal = ""
+
+    return {
+        "ratio": round(ratio, 2),
+        "signal": signal,
+        "cond_vol": cond_vol,
+        "cond_stop": cond_stop,
+        "cond_stable": cond_stable,
+        "window_volume": signal_volume,
+        "baseline_volume": baseline_volume,
+        "baseline_samples": len(baseline_vols),
+    }
+
+
+def _empty_intraday_detail(signal: str, signal_volume: float = 0.0) -> dict:
+    return {
+        "ratio": 0.0,
+        "signal": signal,
+        "cond_vol": False,
+        "cond_stop": False,
+        "cond_stable": False,
+        "window_volume": signal_volume,
+        "baseline_volume": 0.0,
+        "baseline_samples": 0,
+    }
+
+
+def _get_market_now(market: str) -> datetime:
+    return datetime.now(_market_tz(market))
+
+
+def get_signal_detail(ratio: float, price_change: float = 0, market: str = "CN") -> str:
+    """获取历史同期量比信号详情。"""
+    if ratio > 2.0 and price_change > 2:
+        return "放量突破"
+    if ratio > 2.0 and price_change < -2:
+        return "放量下跌"
+    if ratio < 0.6 and price_change > 0:
+        return "缩量止跌"
+    if ratio > 1.5 and market == "CN":
+        now = _get_market_now(market)
+        if (now.hour == 14 and now.minute >= 30) or now.hour == 15:
+            return "尾盘放量"
+    return ""
 
 
 def get_db_path() -> Path:
@@ -254,29 +509,72 @@ def get_db_path() -> Path:
     return DB_PATH
 
 
-# 数据库初始化标志
-_db_initialized = False
-
-
 def init_db():
-    """初始化 SQLite 数据库（只执行一次）"""
+    """初始化 SQLite。schema v2 会清空旧错误口径 volume_ratios/signals。"""
     global _db_initialized
     if _db_initialized:
         return
 
     db_path = get_db_path()
     with sqlite3.connect(db_path, timeout=30) as conn:
+        current_version = _get_schema_version(conn)
+        if current_version != SCHEMA_VERSION:
+            conn.execute("DROP TABLE IF EXISTS volume_ratios")
+            conn.execute("DROP TABLE IF EXISTS quote_snapshots")
+            conn.execute("DROP TABLE IF EXISTS signals")
+            conn.execute("DROP TABLE IF EXISTS signal_states")
+            conn.execute("DROP TABLE IF EXISTS schema_meta")
+            conn.execute("CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            conn.execute(
+                "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)",
+                (str(SCHEMA_VERSION),),
+            )
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS quote_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker TEXT NOT NULL,
+                market TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                market_timestamp TEXT,
+                market_date TEXT,
+                price REAL,
+                open REAL,
+                high REAL,
+                low REAL,
+                volume REAL,
+                turnover REAL,
+                change REAL,
+                change_pct REAL,
+                source TEXT DEFAULT 'websocket',
+                UNIQUE(ticker, timestamp, volume, price)
+            )
+        """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS volume_ratios (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ticker TEXT NOT NULL,
+                name TEXT,
                 timestamp TEXT NOT NULL,
-                ratio REAL,
-                volume_today REAL,
-                volume_avg5 REAL,
+                market TEXT,
+                market_timestamp TEXT,
+                market_date TEXT,
                 price REAL,
                 change_pct REAL,
-                signal TEXT,
+                historical_ratio REAL,
+                historical_today_volume REAL,
+                historical_avg_volume REAL,
+                historical_sample_days INTEGER,
+                historical_signal TEXT,
+                intraday_ratio REAL,
+                intraday_window_volume REAL,
+                intraday_baseline_volume REAL,
+                intraday_baseline_samples INTEGER,
+                intraday_signal TEXT,
+                cond_vol INTEGER DEFAULT 0,
+                cond_stop INTEGER DEFAULT 0,
+                cond_stable INTEGER DEFAULT 0,
+                data_quality TEXT,
                 UNIQUE(ticker, timestamp)
             )
         """)
@@ -296,6 +594,13 @@ def init_db():
             )
         """)
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS signal_states (
+                ticker TEXT PRIMARY KEY,
+                state TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS llm_calls (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT NOT NULL,
@@ -303,203 +608,108 @@ def init_db():
                 success INTEGER DEFAULT 1
             )
         """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_quote_snapshots_ticker_time ON quote_snapshots(ticker, timestamp)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_quote_snapshots_market_date ON quote_snapshots(market, market_date)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_volume_ratios_ticker ON volume_ratios(ticker)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_volume_ratios_timestamp ON volume_ratios(timestamp)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp)")
     _db_initialized = True
 
 
-def calc_volume_ratio(ticker: str, current_time: datetime = None, api_vol_data: dict = None) -> tuple:
-    """
-    日级别量比 = 今日累计成交量 / 近5日平均日成交量
-    返回: (ratio, today_vol, avg_5d_vol, signal)
-    """
-    if current_time is None:
-        current_time = datetime.now()
-
-    config = load_config()
-    window = config.get("params", {}).get("volume_ratio_window", 5)
-
-    today_vol = get_last_day_volume(ticker, current_time)
-    past_vols = []
-
-    for i in range(1, window + 1):
-        past_day = current_time - timedelta(days=i)
-        vol = get_day_volume(ticker, past_day, api_vol_data)
-        if vol > 0:
-            past_vols.append(vol)
-
-    if not past_vols:
-        return 0.0, today_vol, 0.0, "数据不足"
-
-    avg_5d_vol = sum(past_vols) / len(past_vols)
-    ratio = today_vol / avg_5d_vol if avg_5d_vol > 0 else 0.0
-
-    signal = get_signal(ratio, current_time)
-
-    return ratio, today_vol, avg_5d_vol, signal
-
-
-def get_signal(ratio: float, current_time: datetime = None) -> str:
-    """根据量比范围判断信号"""
-    if ratio < 0.6:
-        return "缩量异常"
-    elif ratio < 0.8:
-        return "缩量"
-    elif ratio <= 1.2:
-        return "正常"
-    elif ratio <= 2.0:
-        return "放量"
-    elif ratio <= 5.0:
-        return "显著放量"
-    else:
-        return "巨量"
-
-
-BASELINE_WINDOW = 10  # 基线窗口：最近 10 个间隔（约5分钟）
-SIGNAL_WINDOW = 5     # 信号窗口：最近 5 个间隔（约2.5分钟）
-MIN_RECORDS = BASELINE_WINDOW + 3  # 最少需要 13 条记录才能检测
-
-
-def calc_intraday_ratio(ticker: str, current_time: datetime = None) -> tuple:
-    """
-    日内滚动量比：三条件放量止跌检测
-    基于 monitor_stop_signal.py 逻辑
-
-    返回: (ratio, signal_name, cond_vol, cond_stop, cond_stable)
-    """
-    if current_time is None:
-        current_time = datetime.now()
-
-    raw_snapshots = read_snapshots(ticker, current_time)
-    if len(raw_snapshots) < MIN_RECORDS:
-        return 0.0, "数据不足", False, False, False
-
-    # 构建 real_vol 序列（差分量）
-    records = []
-    prev_vol = None
-    for data in raw_snapshots:
-        vol = float(data.get("volume", 0) or 0)
-        price = float(data.get("price", 0) or 0)
-        low = float(data.get("low", 0) or 0)
-        ts = parse_timestamp(data.get("timestamp", ""))
-
-        if prev_vol is not None:
-            real_vol = max(0, vol - prev_vol)
-            records.append({
-                "ts": ts,
-                "price": price,
-                "real_vol": real_vol,
-                "low": low,
-            })
-        prev_vol = vol
-
-    if len(records) < MIN_RECORDS:
-        return 0.0, "数据不足", False, False, False
-
-    # 分割基线和信号窗口
-    baseline_recs = records[-(SIGNAL_WINDOW + BASELINE_WINDOW) : -SIGNAL_WINDOW]
-    signal_recs = records[-SIGNAL_WINDOW:]
-
-    base_vols = [r["real_vol"] for r in baseline_recs if r["real_vol"] > 0]
-    sig_vols = [r["real_vol"] for r in signal_recs if r["real_vol"] > 0]
-
-    if not base_vols or not sig_vols:
-        return 0.0, "数据不足", False, False, False
-
-    avg_base_vol = sum(base_vols) / len(base_vols)
-    avg_sig_vol = sum(sig_vols) / len(sig_vols)
-    vol_ratio = avg_sig_vol / avg_base_vol if avg_base_vol > 0 else 0.0
-
-    # 条件 1: 放量
-    cond_vol = vol_ratio > 1.5
-
-    # 条件 2: 止跌（信号期最低价 >= 基线最低价 × 0.995）
-    base_min_price = min(r["low"] for r in baseline_recs)
-    sig_min_low = min(r["low"] for r in signal_recs)
-    cond_stop = sig_min_low >= base_min_price * 0.995
-
-    # 条件 3: 企稳（最新价 > 信号期最低价 × 1.005）
-    sig_prices = [r["price"] for r in signal_recs]
-    sig_min_price = min(sig_prices)
-    latest_price = sig_prices[-1]
-    cond_stable = latest_price > sig_min_price * 1.005
-
-    # 信号名称
-    if cond_vol and cond_stop and cond_stable:
-        signal_name = "放量止跌"
-    elif cond_vol:
-        signal_name = "放量"
-    else:
-        signal_name = ""
-
-    return round(vol_ratio, 2), signal_name, cond_vol, cond_stop, cond_stable
-
-
-def _get_market_now(market: str) -> datetime:
-    """获取市场本地时间"""
+def _get_schema_version(conn: sqlite3.Connection) -> int:
     try:
-        import pytz
-        tz_map = {"CN": "Asia/Shanghai", "HK": "Asia/Hong_Kong", "US": "US/Eastern"}
-        tz = pytz.timezone(tz_map.get(market, "Asia/Shanghai"))
-        return datetime.now(pytz.UTC).astimezone(tz)
-    except ImportError:
-        return datetime.now()
+        row = conn.execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone()
+        return int(row[0]) if row else 0
+    except sqlite3.Error:
+        return 0
 
 
-def get_signal_detail(ratio: float, price_change: float = 0, market: str = "CN") -> str:
-    """获取信号详情"""
-    if ratio > 2.0 and price_change > 2:
-        return "放量突破"
-    elif ratio > 2.0 and price_change < -2:
-        return "放量下跌"
-    elif ratio < 0.6 and price_change > 0:
-        return "缩量止跌"
-    elif ratio > 1.5 and market == "CN":
-        now = _get_market_now(market)
-        if (now.hour == 14 and now.minute >= 30) or now.hour == 15:
-            return "尾盘放量"
-    return ""
+def save_quote_snapshot(ticker: str, data: dict, source: str = "websocket"):
+    """按 WebSocket/REST 返回结构保存原始快照，供后续回放和审计。"""
+    init_db()
+    market = get_market(ticker)
+    ts = parse_timestamp(data.get("timestamp", ""))
+    market_ts = _to_market_dt(ts, market) if ts else None
+    try:
+        with sqlite3.connect(get_db_path(), timeout=30) as conn:
+            conn.execute("""
+                INSERT OR IGNORE INTO quote_snapshots
+                (ticker, market, timestamp, market_timestamp, market_date, price, open, high, low,
+                 volume, turnover, change, change_pct, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                ticker,
+                market,
+                data.get("timestamp", ""),
+                market_ts.isoformat() if market_ts else "",
+                market_ts.date().isoformat() if market_ts else "",
+                float(data.get("price", 0) or 0),
+                float(data.get("open", 0) or 0),
+                float(data.get("high", 0) or 0),
+                float(data.get("low", 0) or 0),
+                float(data.get("volume", 0) or 0),
+                float(data.get("turnover", 0) or 0),
+                float(data.get("change", 0) or 0),
+                float(data.get("change_pct", 0) or 0),
+                source,
+            ))
+    except sqlite3.Error:
+        pass
 
 
-# 降频写入缓存: {ticker: last_write_time}
-_last_ratio_write = {}
-RATIO_WRITE_INTERVAL = 300  # 5 分钟写一次
-
-
-def save_ratio(ticker: str, ratio: float, volume_today: float, volume_avg5: float,
-               price: float, change_pct: float, signal: str):
-    """保存量比到数据库（每 5 分钟写一次）"""
+def save_ratio(result: dict):
+    """保存两套量比结果（每 ticker 每 5 分钟写一次）。"""
     now = datetime.now()
+    ticker = result["ticker"]
     last_write = _last_ratio_write.get(ticker)
     if last_write and (now - last_write).total_seconds() < RATIO_WRITE_INTERVAL:
         return
 
     init_db()
-    db_path = get_db_path()
-
-    try:
-        with sqlite3.connect(db_path, timeout=30) as conn:
-            conn.execute("""
-                INSERT INTO volume_ratios
-                (ticker, timestamp, ratio, volume_today, volume_avg5, price, change_pct, signal)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (ticker, now.isoformat(), ratio, volume_today, volume_avg5, price, change_pct, signal))
-        _last_ratio_write[ticker] = now
-    except sqlite3.IntegrityError:
-        pass
+    with sqlite3.connect(get_db_path(), timeout=30) as conn:
+        conn.execute("""
+            INSERT INTO volume_ratios
+            (ticker, name, timestamp, market, market_timestamp, market_date, price, change_pct,
+             historical_ratio, historical_today_volume, historical_avg_volume, historical_sample_days,
+             historical_signal, intraday_ratio, intraday_window_volume, intraday_baseline_volume,
+             intraday_baseline_samples, intraday_signal, cond_vol, cond_stop, cond_stable, data_quality)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            ticker,
+            result.get("name", ticker),
+            now.isoformat(),
+            result.get("market", ""),
+            result.get("market_time", ""),
+            result.get("market_date", ""),
+            result.get("price", 0),
+            result.get("change_pct", 0),
+            result.get("ratio", 0),
+            result.get("volume_today", 0),
+            result.get("volume_avg5", 0),
+            result.get("historical_sample_days", 0),
+            result.get("signal", ""),
+            result.get("ratio_intraday", 0),
+            result.get("intraday_window_volume", 0),
+            result.get("intraday_baseline_volume", 0),
+            result.get("intraday_baseline_samples", 0),
+            result.get("signal_intraday", ""),
+            int(bool(result.get("cond_vol", False))),
+            int(bool(result.get("cond_stop", False))),
+            int(bool(result.get("cond_stable", False))),
+            result.get("data_quality", ""),
+        ))
+    _last_ratio_write[ticker] = now
 
 
 def save_signal(ticker: str, name: str, signal_type: str, ratio: float,
                 price: float, change_pct: float, source: str = "",
                 llm_analysis: str = "", notified: int = 1):
-    """保存信号记录到 signals 表"""
     init_db()
-    db_path = get_db_path()
     now = datetime.now().isoformat()
-
     try:
-        with sqlite3.connect(db_path, timeout=30) as conn:
+        with sqlite3.connect(get_db_path(), timeout=30) as conn:
             conn.execute("""
                 INSERT INTO signals
                 (ticker, name, timestamp, signal_type, ratio, price, change_pct, source, llm_analysis, notified)
@@ -510,32 +720,23 @@ def save_signal(ticker: str, name: str, signal_type: str, ratio: float,
 
 
 def get_latest_snapshot(ticker: str) -> Optional[dict]:
-    """获取最新行情快照"""
     return get_latest_snapshot_info(ticker, datetime.now())
 
 
 def compute_all() -> List[dict]:
-    """计算所有监控标的的量比"""
     config = load_config()
     tickers = get_all_tickers(config)
-
-    # 批量获取 REST API 数据（价格 + 成交量），一次 API 调用
     api_data = _fetch_price_from_api(tickers)
-
-    # 批量获取历史日成交量（K 线 API）
-    api_vol_data = _fetch_historical_volumes(tickers, days=7)
-
     results = []
     for ticker in tickers:
-        result = compute_ticker(ticker, api_data=api_data, api_vol_data=api_vol_data)
+        result = compute_ticker(ticker, api_data=api_data)
         if result:
             results.append(result)
-
     return results
 
 
 def _fetch_price_from_api(tickers: list) -> dict:
-    """从长桥 API 批量获取最新价格（用于无快照数据的标的）"""
+    """从长桥 API 批量获取最新价格；量比本身不使用日 K 全日量。"""
     if not tickers:
         return {}
     try:
@@ -546,7 +747,6 @@ def _fetch_price_from_api(tickers: list) -> dict:
         if not files:
             return {}
         cid = files[0].name
-        # 抑制 SDK 的 stdout 输出（SDK 可能直接写 fd 1）
         old_stdout_fd = os.dup(1)
         devnull = os.open(os.devnull, os.O_WRONLY)
         os.dup2(devnull, 1)
@@ -558,8 +758,6 @@ def _fetch_price_from_api(tickers: list) -> dict:
             config = Config.from_oauth(oauth)
             ctx = QuoteContext(config)
             quotes = ctx.quote(tickers)
-        except Exception:
-            raise
         finally:
             sys.stdout = old_stdout
             os.dup2(old_stdout_fd, 1)
@@ -569,7 +767,7 @@ def _fetch_price_from_api(tickers: list) -> dict:
             last = float(q.last_done or 0)
             prev = float(q.prev_close or 0)
             change_pct = ((last - prev) / prev * 100) if prev > 0 else 0
-            result[q.symbol] = {"price": last, "change_pct": round(change_pct, 2), "volume": int(q.volume)}
+            result[q.symbol] = {"price": last, "change_pct": round(change_pct, 2), "volume": int(q.volume or 0)}
         return result
     except Exception as e:
         print(f"[compute] API 价格获取失败: {e}", flush=True)
@@ -577,65 +775,60 @@ def _fetch_price_from_api(tickers: list) -> dict:
 
 
 def compute_ticker(ticker: str, api_data: dict = None, api_vol_data: dict = None) -> Optional[dict]:
-    """计算单个标的的量比（api_data/api_vol_data 可选，避免重复 API 调用）"""
+    market = get_market(ticker)
+    config = load_config()
+    name = get_ticker_name(config, ticker)
+
+    historical = calc_historical_ratio_detail(ticker)
+    intraday = calc_intraday_ratio_detail(ticker)
     snapshot = get_latest_snapshot(ticker)
-
-    # 单独调用时也获取 K 线历史数据
-    if api_vol_data is None:
-        api_vol_data = _fetch_historical_volumes([ticker], days=7)
-
-    ratio, today_vol, avg_vol, signal = calc_volume_ratio(ticker, api_vol_data=api_vol_data)
-    intraday_ratio, signal_intraday, cond_vol, cond_stop, cond_stable = calc_intraday_ratio(ticker)
 
     price = snapshot.get("price", 0) if snapshot else 0
     change_pct = snapshot.get("change_pct", 0) if snapshot else 0
 
-    # REST API 修正：API volume = 当日成交量（K 线数据证实）
     if api_data is None:
         api_data = _fetch_price_from_api([ticker])
     if ticker in api_data:
-        price = api_data[ticker]["price"]
+        price = api_data[ticker]["price"] or price
         change_pct = api_data[ticker]["change_pct"]
-        api_vol = api_data[ticker]["volume"]
 
-        if not is_trading_day(get_market(ticker)):
-            ratio, signal = 0.0, "休市"
-        elif api_vol > 0:
-            today_vol = api_vol
-            if avg_vol > 0:
-                ratio = round(today_vol / avg_vol, 2)
-                signal = get_signal(ratio)
+    signal = historical["signal"]
+    if not is_trading_day(market):
+        signal = "休市"
 
-    config = load_config()
-    name = get_ticker_name(config, ticker)
-    market = get_market(ticker)
-
-    # 休市时清除 signal_detail，避免信息矛盾
-    signal_detail = "" if signal == "休市" else get_signal_detail(ratio, change_pct, market)
+    signal_detail = "" if signal == "休市" else get_signal_detail(historical["ratio"], change_pct, market)
 
     result = {
         "ticker": ticker,
         "name": name,
-        "ratio": round(ratio, 2),
-        "ratio_intraday": intraday_ratio,
-        "volume_today": today_vol,
-        "volume_avg5": round(avg_vol, 2),
+        "market": market,
+        "market_date": historical["market_date"],
+        "market_time": historical["market_time"],
+        "ratio": round(historical["ratio"], 2),
+        "ratio_intraday": intraday["ratio"],
+        "volume_today": historical["today_volume"],
+        "volume_avg5": round(historical["avg_volume"], 2),
+        "historical_sample_days": historical["sample_days"],
         "price": price,
         "change_pct": round(change_pct, 2),
         "signal": signal,
         "signal_detail": signal_detail,
-        "signal_intraday": signal_intraday,
-        "cond_vol": cond_vol,
-        "cond_stop": cond_stop,
-        "cond_stable": cond_stable,
+        "signal_intraday": intraday["signal"],
+        "cond_vol": intraday["cond_vol"],
+        "cond_stop": intraday["cond_stop"],
+        "cond_stable": intraday["cond_stable"],
+        "intraday_window_volume": intraday["window_volume"],
+        "intraday_baseline_volume": round(intraday["baseline_volume"], 2),
+        "intraday_baseline_samples": intraday["baseline_samples"],
+        "data_quality": historical["quality"],
     }
 
-    save_ratio(ticker, ratio, today_vol, avg_vol, price, change_pct, signal)
-
+    save_ratio(result)
     return result
 
 
 if __name__ == "__main__":
+    init_db()
     if len(sys.argv) > 1:
         ticker = sys.argv[1]
         result = compute_ticker(ticker)
@@ -645,5 +838,4 @@ if __name__ == "__main__":
             print(f"无法计算 {ticker} 的量比", file=sys.stderr)
             sys.exit(1)
     else:
-        results = compute_all()
-        print(json.dumps(results, ensure_ascii=False, indent=2))
+        print(json.dumps(compute_all(), ensure_ascii=False, indent=2))
