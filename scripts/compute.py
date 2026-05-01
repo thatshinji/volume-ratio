@@ -21,7 +21,8 @@ DB_PATH = ROOT / "data" / "ratios.db"
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from core.config import load_config
-from core.market import get_market, get_all_tickers, get_ticker_name
+from core.market import get_market, get_all_tickers, get_ticker_name, is_market_trading
+from core.market import _is_trading_day as is_trading_day
 
 
 def parse_timestamp(ts: str) -> Optional[datetime]:
@@ -128,72 +129,6 @@ def get_last_day_volume(ticker: str, day: datetime) -> float:
 _historical_vol_cache = {}
 # K 线数据日缓存: {ticker: (date_fetched, api_vol_data)}
 _kline_daily_cache = {}
-# 交易日日缓存: {market: (date_fetched, trading_days_set)}
-_trading_days_daily_cache = {}
-
-
-def _check_trading_days(market: str) -> set:
-    """查询今日是否为交易日，返回最近 5 个交易日集合（每天只查一次）"""
-    today = date.today()
-    if market in _trading_days_daily_cache:
-        cached_date, cached_data = _trading_days_daily_cache[market]
-        if cached_date == today:
-            return cached_data
-    try:
-        import io
-        from longbridge.openapi import OAuthBuilder, Config, QuoteContext, Market
-        token_dir = Path.home() / ".longbridge" / "openapi" / "tokens"
-        files = list(token_dir.iterdir())
-        if not files:
-            return set()
-        cid = files[0].name
-
-        old_stdout_fd = os.dup(1)
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(devnull, 1)
-        os.close(devnull)
-        old_stdout = sys.stdout
-        sys.stdout = io.StringIO()
-        try:
-            oauth = OAuthBuilder(cid).build(lambda url: None)
-            config = Config.from_oauth(oauth)
-            ctx = QuoteContext(config)
-            market_enum = getattr(Market, market, None)
-            if market_enum is None:
-                return set()
-            end = date.today() + timedelta(days=1)
-            start = end - timedelta(days=10)
-            result = ctx.trading_days(market_enum, start, end)
-        except Exception:
-            sys.stdout = old_stdout
-            os.dup2(old_stdout_fd, 1)
-            os.close(old_stdout_fd)
-            return set()
-        finally:
-            sys.stdout = old_stdout
-            os.dup2(old_stdout_fd, 1)
-            os.close(old_stdout_fd)
-
-        days = set(result.trading_days)
-        _trading_days_daily_cache[market] = (today, days)
-        return days
-    except Exception:
-        return set()
-
-
-# 交易日缓存 {market: set_of_trading_day_strings}
-_trading_days_cache = {}
-
-
-def is_trading_day(ticker: str) -> bool:
-    """判断今天是否为该 ticker 所在市场的交易日"""
-    market = get_market(ticker)
-    if market not in _trading_days_cache:
-        _trading_days_cache[market] = _check_trading_days(market)
-    trading_days = _trading_days_cache[market]
-    if not trading_days:
-        return True  # 查询失败时默认交易日
-    return date.today() in trading_days
 
 
 def _fetch_historical_volumes(tickers: list, days: int = 7) -> dict:
@@ -233,9 +168,6 @@ def _fetch_historical_volumes(tickers: list, days: int = 7) -> dict:
             config = Config.from_oauth(oauth)
             ctx = QuoteContext(config)
         except Exception:
-            sys.stdout = old_stdout
-            os.dup2(old_stdout_fd, 1)
-            os.close(old_stdout_fd)
             raise
         finally:
             sys.stdout = old_stdout
@@ -259,9 +191,6 @@ def _fetch_historical_volumes(tickers: list, days: int = 7) -> dict:
                         ticker, Period.Day, AdjustType.NoAdjust, start, end
                     )
                 except Exception:
-                    sys.stdout = old_stdout
-                    os.dup2(old_stdout_fd, 1)
-                    os.close(old_stdout_fd)
                     continue
                 finally:
                     sys.stdout = old_stdout
@@ -624,13 +553,6 @@ def _fetch_price_from_api(tickers: list) -> dict:
             ctx = QuoteContext(config)
             quotes = ctx.quote(tickers)
         except Exception:
-            # 确保 stdout 恢复
-            try:
-                sys.stdout = old_stdout
-                os.dup2(old_stdout_fd, 1)
-                os.close(old_stdout_fd)
-            except Exception:
-                pass
             raise
         finally:
             sys.stdout = old_stdout

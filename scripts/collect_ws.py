@@ -16,6 +16,7 @@ import signal
 import sys
 import threading
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -122,12 +123,13 @@ def on_quote(symbol: str, quote):
     global _quote_count
     try:
         data = extract_fields(quote, symbol)
-        _quote_count += 1
         with _cache_lock:
+            _quote_count += 1
             _active_tickers.add(symbol)
         quote_queue.put((symbol, data))
     except (OSError, ValueError, KeyError) as e:
         print(f"[ws] on_quote error: {e}", flush=True)
+        traceback.print_exc()
 
 
 def get_jsonl_path(ticker: str, day: datetime = None) -> Path:
@@ -195,16 +197,20 @@ def run_websocket():
                     save_snapshot(symbol, data)
                     quote_queue.task_done()
                     # 定期清理 prev_close 缓存，防止无限增长
-                    if _quote_count % _CACHE_CLEAN_INTERVAL == 0:
+                    with _cache_lock:
+                        should_clean = (_quote_count % _CACHE_CLEAN_INTERVAL == 0)
+                    if should_clean:
                         with _cache_lock:
                             # 只保留最近有行情的 ticker
                             for k in list(_prev_close_cache.keys()):
                                 if k not in _active_tickers:
                                     del _prev_close_cache[k]
+                            _active_tickers.clear()
                 except queue.Empty:
                     continue
                 except (OSError, ValueError, KeyError) as e:
                     print(f"[ws] error: {e}", flush=True)
+                    traceback.print_exc()
 
             # running 被清除，正常退出
             return
@@ -224,6 +230,7 @@ def run_websocket():
 
         except Exception as e:
             print(f"[ws] 未知异常: {e}", flush=True)
+            traceback.print_exc()
             return
 
 

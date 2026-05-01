@@ -4,6 +4,7 @@
 启动 cron 任务 + WebSocket 采集进程 + 飞书机器人
 """
 
+import fcntl
 import os
 import subprocess
 import sys
@@ -30,21 +31,29 @@ def add_cron(line: str):
 def start_websocket():
     """直接启动 WebSocket 采集进程"""
     pid_file = LOG_DIR / "ws_collect.pid"
-    if pid_file.exists():
-        try:
-            pid = int(pid_file.read_text().strip())
-            os.kill(pid, 0)
-            print(f"[start] WebSocket 已在运行，PID: {pid}")
-            return
-        except (ValueError, OSError):
-            pass
+    lock_file = LOG_DIR / "ws_collect.lock"
 
-    print("[start] 启动 WebSocket 采集进程...")
-    pid = os.fork()
-    if pid > 0:
-        pid_file.write_text(str(pid))
-        print(f"[start] WebSocket 启动，PID: {pid}")
-        return
+    # 使用文件锁防止竞态条件
+    with open(lock_file, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            if pid_file.exists():
+                try:
+                    pid = int(pid_file.read_text().strip())
+                    os.kill(pid, 0)
+                    print(f"[start] WebSocket 已在运行，PID: {pid}")
+                    return
+                except (ValueError, OSError):
+                    pass
+
+            print("[start] 启动 WebSocket 采集进程...")
+            pid = os.fork()
+            if pid > 0:
+                pid_file.write_text(str(pid))
+                print(f"[start] WebSocket 启动，PID: {pid}")
+                return
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
 
     os.setsid()
     pid = os.fork()
@@ -69,33 +78,41 @@ def start_websocket():
 def start_feishu_bot():
     """启动飞书机器人进程"""
     pid_file = LOG_DIR / "feishu_bot.pid"
-    if pid_file.exists():
+    lock_file = LOG_DIR / "feishu_bot.lock"
+
+    # 使用文件锁防止竞态条件
+    with open(lock_file, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
         try:
-            pid = int(pid_file.read_text().strip())
-            os.kill(pid, 0)
-            print(f"[start] 飞书机器人已在运行，PID: {pid}")
-            return
-        except (ValueError, OSError):
-            pass
+            if pid_file.exists():
+                try:
+                    pid = int(pid_file.read_text().strip())
+                    os.kill(pid, 0)
+                    print(f"[start] 飞书机器人已在运行，PID: {pid}")
+                    return
+                except (ValueError, OSError):
+                    pass
 
-    # 检查飞书配置
-    import yaml
-    config_path = ROOT / "config.yaml"
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
-    feishu = config.get("feishu", {})
-    if not feishu.get("app_id") or not feishu.get("app_secret"):
-        print("[start] 飞书 app_id/app_secret 未配置，跳过机器人启动")
-        return
+            # 检查飞书配置
+            import yaml
+            config_path = ROOT / "config.yaml"
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = yaml.safe_load(f)
+            feishu = config.get("feishu", {})
+            if not feishu.get("app_id") or not feishu.get("app_secret"):
+                print("[start] 飞书 app_id/app_secret 未配置，跳过机器人启动")
+                return
 
-    print("[start] 启动飞书机器人...")
-    python_bin = str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
+            print("[start] 启动飞书机器人...")
+            python_bin = str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
 
-    pid = os.fork()
-    if pid > 0:
-        pid_file.write_text(str(pid))
-        print(f"[start] 飞书机器人启动，PID: {pid}")
-        return
+            pid = os.fork()
+            if pid > 0:
+                pid_file.write_text(str(pid))
+                print(f"[start] 飞书机器人启动，PID: {pid}")
+                return
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
 
     os.setsid()
     pid = os.fork()

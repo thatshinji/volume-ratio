@@ -47,7 +47,7 @@ def is_market_closed(market: str) -> bool:
 
     if market == "CN":
         # A股 15:00 收盘，16:30 后清理
-        return now.hour >= 16 and now.minute >= 30
+        return now.hour > 16 or (now.hour == 16 and now.minute >= 30)
     elif market == "HK":
         # 港股 16:00 收盘，17:00 后清理
         return now.hour >= 17

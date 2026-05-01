@@ -68,11 +68,23 @@ def detect_signals(results: List[dict]) -> List[dict]:
     alert_threshold = params.get("alert_threshold", 2.0)
     shrink_threshold = params.get("shrink_threshold", 0.6)
     mute_list = config.get("mute", {})
+    now = datetime.now()
+    mute_dirty = False
 
     for r in results:
         ticker = r.get("ticker", "")
         if ticker in mute_list:
-            continue  # 跳过静默标的
+            # 检查是否过期
+            try:
+                until = datetime.fromisoformat(mute_list[ticker])
+                if now < until:
+                    continue  # 仍在静默期，跳过
+                else:
+                    del mute_list[ticker]  # 过期，移除
+                    mute_dirty = True
+            except (ValueError, TypeError):
+                del mute_list[ticker]  # 格式错误，移除
+                mute_dirty = True
         market = get_market(ticker)
         if not is_market_trading(market):
             continue
@@ -138,6 +150,14 @@ def detect_signals(results: List[dict]) -> List[dict]:
                 "triggered_signals": ["放量"],
                 "source": "intraday",
             })
+
+    # 保存配置（仅在移除过期 mute 时）
+    if mute_dirty:
+        import yaml
+        from pathlib import Path
+        CONFIG_PATH = Path(__file__).parent.parent / "config.yaml"
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            yaml.dump(config, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
 
     return alerts
 

@@ -44,9 +44,6 @@ def _check_trading_days(market: str) -> set:
             start = end - timedelta(days=10)
             result = ctx.trading_days(market_enum, start, end)
         except Exception:
-            sys.stdout = old_stdout
-            os.dup2(old_stdout_fd, 1)
-            os.close(old_stdout_fd)
             return set()
         finally:
             sys.stdout = old_stdout
