@@ -3,18 +3,82 @@
 所有脚本通过 `from core.market import get_market, get_all_tickers` 使用
 """
 
-from datetime import datetime
+from datetime import datetime, date, timedelta
 
 from .config import parse_ticker
 
+# 交易日缓存: {market: (date_fetched, trading_days_set)}
+_trading_days_cache = {}
+
+
+def _check_trading_days(market: str) -> set:
+    """查询交易日集合（每天只查一次）"""
+    today = date.today()
+    if market in _trading_days_cache:
+        cached_date, cached_data = _trading_days_cache[market]
+        if cached_date == today:
+            return cached_data
+    try:
+        import io, os, sys
+        from longbridge.openapi import OAuthBuilder, Config, QuoteContext, Market
+        token_dir = os.path.expanduser("~/.longbridge/openapi/tokens")
+        files = os.listdir(token_dir)
+        if not files:
+            return set()
+        cid = files[0]
+
+        old_stdout_fd = os.dup(1)
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 1)
+        os.close(devnull)
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            oauth = OAuthBuilder(cid).build(lambda url: None)
+            config = Config.from_oauth(oauth)
+            ctx = QuoteContext(config)
+            market_enum = getattr(Market, market, None)
+            if market_enum is None:
+                return set()
+            end = today + timedelta(days=1)
+            start = end - timedelta(days=10)
+            result = ctx.trading_days(market_enum, start, end)
+        except Exception:
+            sys.stdout = old_stdout
+            os.dup2(old_stdout_fd, 1)
+            os.close(old_stdout_fd)
+            return set()
+        finally:
+            sys.stdout = old_stdout
+            os.dup2(old_stdout_fd, 1)
+            os.close(old_stdout_fd)
+
+        days = set(result.trading_days)
+        _trading_days_cache[market] = (today, days)
+        return days
+    except Exception:
+        return set()
+
+
+def _is_trading_day(market: str) -> bool:
+    """判断今天是否为该市场的交易日"""
+    trading_days = _check_trading_days(market)
+    if not trading_days:
+        return True  # 查询失败时默认交易日
+    return date.today() in trading_days
+
 
 def is_market_trading(market: str) -> bool:
-    """判断市场当前是否在交易时间内"""
+    """判断市场当前是否在交易时间内（含假期检测）"""
     now = datetime.now()
     weekday = now.weekday()  # 0=周一, 6=周日
 
     # 周末不交易
     if weekday >= 5:
+        return False
+
+    # 假期检测：用 trading_days API 判断今天是否为交易日
+    if not _is_trading_day(market):
         return False
 
     if market == "CN":
