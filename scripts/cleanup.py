@@ -7,7 +7,6 @@
   - JSONL 快照：保留 20 天
   - volume_ratios：保留 20 天
   - signals：保留 20 天
-  - daily_summary：保留 90 天
 """
 
 import os
@@ -28,7 +27,6 @@ from core.config import load_config
 SNAPSHOT_KEEP_DAYS = 20
 RATIO_KEEP_DAYS = 20
 SIGNAL_KEEP_DAYS = 20
-SUMMARY_KEEP_DAYS = 90
 
 
 def get_et_now() -> datetime:
@@ -197,16 +195,6 @@ def main():
     if not args.dry_run:
         cleanup_database("volume_ratios", RATIO_KEEP_DAYS)
         cleanup_database("signals", SIGNAL_KEEP_DAYS)
-        # daily_summary 使用 date 字段而非 timestamp，单独处理
-        if DB_PATH.exists():
-            cutoff_date = (datetime.now() - timedelta(days=SUMMARY_KEEP_DAYS)).strftime("%Y-%m-%d")
-            try:
-                with sqlite3.connect(DB_PATH, timeout=30) as conn:
-                    cursor = conn.execute("DELETE FROM daily_summary WHERE date < ?", (cutoff_date,))
-                    if cursor.rowcount > 0:
-                        print(f"[cleanup] daily_summary: 删除 {cursor.rowcount} 条过期记录")
-            except sqlite3.OperationalError:
-                pass
 
     # 显示清理后状态
     usage = get_disk_usage()

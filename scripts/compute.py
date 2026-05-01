@@ -9,7 +9,7 @@ import json
 import os
 import sqlite3
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from pathlib import Path
 from typing import Optional, List
 
@@ -117,14 +117,195 @@ def get_interval_volume(ticker: str, day: datetime, window_minutes: int = 5) -> 
 
 
 def get_last_day_volume(ticker: str, day: datetime) -> float:
-    """
-    获取指定日期当天的最终成交量（最后一条快照的 volume）
-    用于 US 股票等 JSONL interval 计算有问题的市场
-    """
+    """获取指定日期 JSONL 最后一条快照的 volume（累计量）"""
     records = read_snapshots(ticker, day)
     if not records:
         return 0.0
     return float(records[-1].get("volume", 0))
+
+
+# 历史日成交量缓存: {(ticker, date_str): volume}
+_historical_vol_cache = {}
+# K 线数据日缓存: {ticker: (date_fetched, api_vol_data)}
+_kline_daily_cache = {}
+# 交易日日缓存: {market: (date_fetched, trading_days_set)}
+_trading_days_daily_cache = {}
+
+
+def _check_trading_days(market: str) -> set:
+    """查询今日是否为交易日，返回最近 5 个交易日集合（每天只查一次）"""
+    today = date.today()
+    if market in _trading_days_daily_cache:
+        cached_date, cached_data = _trading_days_daily_cache[market]
+        if cached_date == today:
+            return cached_data
+    try:
+        import io
+        from longbridge.openapi import OAuthBuilder, Config, QuoteContext, Market
+        token_dir = Path.home() / ".longbridge" / "openapi" / "tokens"
+        files = list(token_dir.iterdir())
+        if not files:
+            return set()
+        cid = files[0].name
+
+        old_stdout_fd = os.dup(1)
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 1)
+        os.close(devnull)
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            oauth = OAuthBuilder(cid).build(lambda url: None)
+            config = Config.from_oauth(oauth)
+            ctx = QuoteContext(config)
+            market_enum = getattr(Market, market, None)
+            if market_enum is None:
+                return set()
+            end = date.today() + timedelta(days=1)
+            start = end - timedelta(days=10)
+            result = ctx.trading_days(market_enum, start, end)
+        except Exception:
+            sys.stdout = old_stdout
+            os.dup2(old_stdout_fd, 1)
+            os.close(old_stdout_fd)
+            return set()
+        finally:
+            sys.stdout = old_stdout
+            os.dup2(old_stdout_fd, 1)
+            os.close(old_stdout_fd)
+
+        days = set(result.trading_days)
+        _trading_days_daily_cache[market] = (today, days)
+        return days
+    except Exception:
+        return set()
+
+
+# 交易日缓存 {market: set_of_trading_day_strings}
+_trading_days_cache = {}
+
+
+def is_trading_day(ticker: str) -> bool:
+    """判断今天是否为该 ticker 所在市场的交易日"""
+    market = get_market(ticker)
+    if market not in _trading_days_cache:
+        _trading_days_cache[market] = _check_trading_days(market)
+    trading_days = _trading_days_cache[market]
+    if not trading_days:
+        return True  # 查询失败时默认交易日
+    return date.today() in trading_days
+
+
+def _fetch_historical_volumes(tickers: list, days: int = 7) -> dict:
+    """批量获取历史日成交量（通过 Longbridge K 线 API，每天只查一次）"""
+    if not tickers:
+        return {}
+
+    today = date.today()
+    # 检查缓存：所有 ticker 都有今日缓存则直接返回
+    result = {}
+    uncached_tickers = []
+    for ticker in tickers:
+        if ticker in _kline_daily_cache and _kline_daily_cache[ticker][0] == today:
+            result.update(_kline_daily_cache[ticker][1])
+        else:
+            uncached_tickers.append(ticker)
+    if not uncached_tickers:
+        return result
+    tickers = uncached_tickers
+    try:
+        import io
+        from longbridge.openapi import OAuthBuilder, Config, QuoteContext, Period, AdjustType
+        token_dir = Path.home() / ".longbridge" / "openapi" / "tokens"
+        files = list(token_dir.iterdir())
+        if not files:
+            return {}
+        cid = files[0].name
+
+        old_stdout_fd = os.dup(1)
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 1)
+        os.close(devnull)
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            oauth = OAuthBuilder(cid).build(lambda url: None)
+            config = Config.from_oauth(oauth)
+            ctx = QuoteContext(config)
+        except Exception:
+            sys.stdout = old_stdout
+            os.dup2(old_stdout_fd, 1)
+            os.close(old_stdout_fd)
+            raise
+        finally:
+            sys.stdout = old_stdout
+            os.dup2(old_stdout_fd, 1)
+            os.close(old_stdout_fd)
+
+        end = date.today()
+        start = end - timedelta(days=days + 5)  # 多取几天，跳过非交易日
+
+        result = {}
+        for ticker in tickers:
+            try:
+                old_stdout_fd = os.dup(1)
+                devnull = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(devnull, 1)
+                os.close(devnull)
+                old_stdout = sys.stdout
+                sys.stdout = io.StringIO()
+                try:
+                    cs = ctx.history_candlesticks_by_date(
+                        ticker, Period.Day, AdjustType.NoAdjust, start, end
+                    )
+                except Exception:
+                    sys.stdout = old_stdout
+                    os.dup2(old_stdout_fd, 1)
+                    os.close(old_stdout_fd)
+                    continue
+                finally:
+                    sys.stdout = old_stdout
+                    os.dup2(old_stdout_fd, 1)
+                    os.close(old_stdout_fd)
+
+                ticker_data = {}
+                for c in cs:
+                    # c.timestamp 格式: "2026-04-30 12:00:00" 或 "2026-04-30 00:00:00"
+                    day_str = str(c.timestamp)[:10].replace("-", "")
+                    vol = int(c.volume)
+                    ticker_data[(ticker, day_str)] = vol
+                result.update(ticker_data)
+                _kline_daily_cache[ticker] = (today, ticker_data)
+            except Exception:
+                continue
+
+        return result
+    except Exception as e:
+        print(f"[compute] 历史成交量获取失败: {e}", flush=True)
+        return {}
+
+
+def get_historical_day_volume(ticker: str, day: datetime, api_vol_data: dict = None) -> float:
+    """获取指定日期的真实日成交量（优先用 API K 线数据）"""
+    day_str = day.strftime("%Y%m%d")
+
+    # 1. 优先用传入的 API 数据
+    if api_vol_data and (ticker, day_str) in api_vol_data:
+        return float(api_vol_data[(ticker, day_str)])
+
+    # 2. 检查缓存
+    if (ticker, day_str) in _historical_vol_cache:
+        return _historical_vol_cache[(ticker, day_str)]
+
+    # 3. 回退到 JSONL 计算
+    records = read_snapshots(ticker, day)
+    if not records:
+        return 0.0
+    if len(records) < 2:
+        return float(records[-1].get("volume", 0))
+    first_vol = float(records[0].get("volume", 0))
+    last_vol = float(records[-1].get("volume", 0))
+    return max(0.0, last_vol - first_vol)
 
 
 def get_today_volume(ticker: str, current_time: datetime = None) -> float:
@@ -138,18 +319,9 @@ def get_today_volume(ticker: str, current_time: datetime = None) -> float:
     return get_interval_volume(ticker, current_time, window)
 
 
-def get_day_volume(ticker: str, day: datetime) -> float:
-    """获取指定日期同时段的真实成交量"""
-    config = load_config()
-    window = config.get("params", {}).get("volume_ratio_window", 5)
-
-    # US 市场：JSONL interval_vol 计算有 bug，改用日终总量
-    if ticker.endswith(".US"):
-        vol = get_last_day_volume(ticker, day)
-        if vol > 0:
-            return vol
-
-    return get_interval_volume(ticker, day, window)
+def get_day_volume(ticker: str, day: datetime, api_vol_data: dict = None) -> float:
+    """获取指定日期的真实成交量（优先用 API K 线数据）"""
+    return get_historical_day_volume(ticker, day, api_vol_data)
 
 
 def get_db_path() -> Path:
@@ -208,10 +380,11 @@ def init_db():
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_volume_ratios_ticker ON volume_ratios(ticker)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_volume_ratios_timestamp ON volume_ratios(timestamp)")
     _db_initialized = True
 
 
-def calc_volume_ratio(ticker: str, current_time: datetime = None) -> tuple:
+def calc_volume_ratio(ticker: str, current_time: datetime = None, api_vol_data: dict = None) -> tuple:
     """
     计算量比
     返回: (ratio, today_vol, avg_5d_vol, signal)
@@ -227,7 +400,7 @@ def calc_volume_ratio(ticker: str, current_time: datetime = None) -> tuple:
 
     for i in range(1, window + 1):
         past_day = current_time - timedelta(days=i)
-        vol = get_day_volume(ticker, past_day)
+        vol = get_day_volume(ticker, past_day, api_vol_data)
         if vol > 0:
             past_vols.append(vol)
 
@@ -354,12 +527,21 @@ def get_signal_detail(ratio: float, price_change: float = 0) -> str:
     return ""
 
 
+# 降频写入缓存: {ticker: last_write_time}
+_last_ratio_write = {}
+RATIO_WRITE_INTERVAL = 300  # 5 分钟写一次
+
+
 def save_ratio(ticker: str, ratio: float, volume_today: float, volume_avg5: float,
                price: float, change_pct: float, signal: str):
-    """保存量比到数据库"""
+    """保存量比到数据库（每 5 分钟写一次）"""
+    now = datetime.now()
+    last_write = _last_ratio_write.get(ticker)
+    if last_write and (now - last_write).total_seconds() < RATIO_WRITE_INTERVAL:
+        return
+
     init_db()
     db_path = get_db_path()
-    now = datetime.now().isoformat()
 
     try:
         with sqlite3.connect(db_path, timeout=30) as conn:
@@ -367,7 +549,8 @@ def save_ratio(ticker: str, ratio: float, volume_today: float, volume_avg5: floa
                 INSERT INTO volume_ratios
                 (ticker, timestamp, ratio, volume_today, volume_avg5, price, change_pct, signal)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (ticker, now, ratio, volume_today, volume_avg5, price, change_pct, signal))
+            """, (ticker, now.isoformat(), ratio, volume_today, volume_avg5, price, change_pct, signal))
+        _last_ratio_write[ticker] = now
     except sqlite3.IntegrityError:
         pass
 
@@ -401,38 +584,17 @@ def compute_all() -> List[dict]:
     config = load_config()
     tickers = get_all_tickers(config)
 
+    # 批量获取 REST API 数据（价格 + 成交量），一次 API 调用
+    api_data = _fetch_price_from_api(tickers)
+
+    # 批量获取历史日成交量（K 线 API）
+    api_vol_data = _fetch_historical_volumes(tickers, days=7)
+
     results = []
     for ticker in tickers:
-        result = compute_ticker(ticker)
+        result = compute_ticker(ticker, api_data=api_data, api_vol_data=api_vol_data)
         if result:
             results.append(result)
-
-    # 对价格为 0 的标的，批量从 API 获取最新价格
-    zero_tickers = [r["ticker"] for r in results if r.get("price", 0) == 0]
-    if zero_tickers:
-        api_prices = _fetch_price_from_api(zero_tickers)
-        for r in results:
-            if r["ticker"] in api_prices:
-                r["price"] = api_prices[r["ticker"]]["price"]
-                r["change_pct"] = api_prices[r["ticker"]]["change_pct"]
-
-    # US 股票：WS PushQuote.volume 不是日累计，REST API 才有正确数据
-    us_tickers = [r["ticker"] for r in results if r["ticker"].endswith(".US")]
-    if us_tickers:
-        api_data = _fetch_price_from_api(us_tickers)
-        for r in results:
-            if r["ticker"] in api_data:
-                r["price"] = api_data[r["ticker"]]["price"]
-                r["change_pct"] = api_data[r["ticker"]]["change_pct"]
-                # US 用 REST API volume 作为 today_vol，同时覆盖 volume_avg5 用昨日日终量
-                api_vol = api_data[r["ticker"]]["volume"]
-                r["volume_today"] = api_vol
-                # ratio = today_vol / avg_5d_avg，重算 ratio
-                avg5 = r["volume_avg5"]
-                if avg5 > 0:
-                    r["ratio"] = round(api_vol / avg5, 2)
-                    r["signal"] = "正常" if r["ratio"] <= 1.2 else ("放量" if r["ratio"] <= 2.0 else ("显著放量" if r["ratio"] <= 5.0 else "巨量"))
-                    r["signal_detail"] = get_signal_detail(r["ratio"], r["change_pct"])
 
     return results
 
@@ -486,15 +648,35 @@ def _fetch_price_from_api(tickers: list) -> dict:
         return {}
 
 
-def compute_ticker(ticker: str) -> Optional[dict]:
-    """计算单个标的的量比"""
+def compute_ticker(ticker: str, api_data: dict = None, api_vol_data: dict = None) -> Optional[dict]:
+    """计算单个标的的量比（api_data/api_vol_data 可选，避免重复 API 调用）"""
     snapshot = get_latest_snapshot(ticker)
 
-    ratio, today_vol, avg_vol, signal = calc_volume_ratio(ticker)
+    # 单独调用时也获取 K 线历史数据
+    if api_vol_data is None:
+        api_vol_data = _fetch_historical_volumes([ticker], days=7)
+
+    ratio, today_vol, avg_vol, signal = calc_volume_ratio(ticker, api_vol_data=api_vol_data)
     intraday_ratio, signal_intraday, cond_vol, cond_stop, cond_stable = calc_intraday_ratio(ticker)
 
     price = snapshot.get("price", 0) if snapshot else 0
     change_pct = snapshot.get("change_pct", 0) if snapshot else 0
+
+    # REST API 修正：API volume = 当日成交量（K 线数据证实）
+    if api_data is None:
+        api_data = _fetch_price_from_api([ticker])
+    if ticker in api_data:
+        price = api_data[ticker]["price"]
+        change_pct = api_data[ticker]["change_pct"]
+        api_vol = api_data[ticker]["volume"]
+
+        if not is_trading_day(ticker):
+            ratio, signal = 0.0, "休市"
+        elif api_vol > 0:
+            today_vol = api_vol
+            if avg_vol > 0:
+                ratio = round(today_vol / avg_vol, 2)
+                signal = get_signal(ratio)
 
     config = load_config()
     name = get_ticker_name(config, ticker)
