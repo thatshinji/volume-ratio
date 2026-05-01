@@ -4,6 +4,8 @@
 """
 
 from datetime import datetime, date, timedelta
+import contextlib
+import io
 
 from .config import parse_ticker
 
@@ -21,7 +23,7 @@ def _fetch_trading_days(market: str, start: date, end: date) -> set:
     if cache_key in _trading_days_range_cache:
         return _trading_days_range_cache[cache_key]
     try:
-        import io, os, sys
+        import os
         from longbridge.openapi import OAuthBuilder, Config, QuoteContext, Market
         token_dir = os.path.expanduser("~/.longbridge/openapi/tokens")
         files = os.listdir(token_dir)
@@ -29,13 +31,7 @@ def _fetch_trading_days(market: str, start: date, end: date) -> set:
             return set()
         cid = files[0]
 
-        old_stdout_fd = os.dup(1)
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(devnull, 1)
-        os.close(devnull)
-        old_stdout = sys.stdout
-        sys.stdout = io.StringIO()
-        try:
+        with contextlib.redirect_stdout(io.StringIO()):
             oauth = OAuthBuilder(cid).build(lambda url: None)
             config = Config.from_oauth(oauth)
             ctx = QuoteContext(config)
@@ -43,14 +39,12 @@ def _fetch_trading_days(market: str, start: date, end: date) -> set:
             if market_enum is None:
                 return set()
             result = ctx.trading_days(market_enum, start, end)
-        except Exception:
-            return set()
-        finally:
-            sys.stdout = old_stdout
-            os.dup2(old_stdout_fd, 1)
-            os.close(old_stdout_fd)
 
-        days = set(result.trading_days)
+        raw_days = getattr(result, "trading_days", result)
+        if isinstance(raw_days, date):
+            days = {raw_days}
+        else:
+            days = set(raw_days or [])
         _trading_days_range_cache[cache_key] = days
         return days
     except Exception:

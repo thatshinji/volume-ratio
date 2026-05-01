@@ -10,6 +10,8 @@ import json
 import os
 import sqlite3
 import sys
+import contextlib
+import io
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -994,28 +996,17 @@ def _fetch_price_from_api(tickers: list) -> dict:
     if not tickers:
         return {}
     try:
-        import io
         from longbridge.openapi import OAuthBuilder, Config, QuoteContext
         token_dir = Path.home() / ".longbridge" / "openapi" / "tokens"
         files = list(token_dir.iterdir())
         if not files:
             return {}
         cid = files[0].name
-        old_stdout_fd = os.dup(1)
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(devnull, 1)
-        os.close(devnull)
-        old_stdout = sys.stdout
-        sys.stdout = io.StringIO()
-        try:
+        with contextlib.redirect_stdout(io.StringIO()):
             oauth = OAuthBuilder(cid).build(lambda url: None)
             config = Config.from_oauth(oauth)
             ctx = QuoteContext(config)
             quotes = ctx.quote(tickers)
-        finally:
-            sys.stdout = old_stdout
-            os.dup2(old_stdout_fd, 1)
-            os.close(old_stdout_fd)
         result = {}
         for q in quotes:
             last = float(q.last_done or 0)
