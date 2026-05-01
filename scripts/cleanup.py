@@ -79,8 +79,11 @@ def cleanup_jsonl_snapshots(market: str, keep_days: int):
             continue
         day_str = parts[-1]
         if day_str < cutoff_str:
-            f.unlink()
-            removed += 1
+            try:
+                f.unlink()
+                removed += 1
+            except OSError as e:
+                print(f"[cleanup] 删除失败 {f.name}: {e}")
 
     if removed > 0:
         print(f"[cleanup] {market} JSONL: 删除 {removed} 个过期文件")

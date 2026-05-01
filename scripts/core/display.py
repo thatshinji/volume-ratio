@@ -42,6 +42,8 @@ def format_ticker_line(ticker: str, name: str, change_pct: float,
 
 def build_market_table(label: str, tickers: list) -> list:
     """为一个市场构建飞书原生表格元素"""
+    # 飞书表格 page_size 限制，最大 100
+    MAX_PAGE_SIZE = 100
     columns = [
         {"name": "ticker", "display_name": "标的", "width": "auto", "horizontal_align": "left", "data_type": "text"},
         {"name": "price", "display_name": "价格", "width": "auto", "horizontal_align": "right", "data_type": "text"},
@@ -51,7 +53,7 @@ def build_market_table(label: str, tickers: list) -> list:
     ]
 
     rows = []
-    for r in tickers:
+    for r in tickers[:MAX_PAGE_SIZE]:
         ratio = r.get("ratio", 0)
         change = r.get("change_pct", 0)
         name = r.get("name", r["ticker"])

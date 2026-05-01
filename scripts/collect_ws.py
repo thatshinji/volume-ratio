@@ -34,6 +34,9 @@ running.set()
 quote_queue = queue.Queue()
 _prev_close_cache = {}  # ticker -> prev_close
 _cache_lock = threading.Lock()
+_quote_count = 0  # 用于定期清理缓存
+_CACHE_CLEAN_INTERVAL = 1000  # 每处理 1000 条行情清理一次缓存
+_active_tickers = set()  # 最近有行情的 ticker 集合
 
 
 def fetch_prev_close(tickers: list):
@@ -116,8 +119,12 @@ def extract_fields(quote, ticker: str) -> dict:
 
 def on_quote(symbol: str, quote):
     """WebSocket 行情回调 - 放到队列，由主线程写出"""
+    global _quote_count
     try:
         data = extract_fields(quote, symbol)
+        _quote_count += 1
+        with _cache_lock:
+            _active_tickers.add(symbol)
         quote_queue.put((symbol, data))
     except (OSError, ValueError, KeyError) as e:
         print(f"[ws] on_quote error: {e}", flush=True)
@@ -187,6 +194,13 @@ def run_websocket():
                     symbol, data = quote_queue.get(timeout=1)
                     save_snapshot(symbol, data)
                     quote_queue.task_done()
+                    # 定期清理 prev_close 缓存，防止无限增长
+                    if _quote_count % _CACHE_CLEAN_INTERVAL == 0:
+                        with _cache_lock:
+                            # 只保留最近有行情的 ticker
+                            for k in list(_prev_close_cache.keys()):
+                                if k not in _active_tickers:
+                                    del _prev_close_cache[k]
                 except queue.Empty:
                     continue
                 except (OSError, ValueError, KeyError) as e:

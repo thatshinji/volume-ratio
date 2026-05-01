@@ -116,6 +116,17 @@ def get_interval_volume(ticker: str, day: datetime, window_minutes: int = 5) -> 
     return max(0.0, latest_vol - ago_vol)
 
 
+def get_last_day_volume(ticker: str, day: datetime) -> float:
+    """
+    获取指定日期当天的最终成交量（最后一条快照的 volume）
+    用于 US 股票等 JSONL interval 计算有问题的市场
+    """
+    records = read_snapshots(ticker, day)
+    if not records:
+        return 0.0
+    return float(records[-1].get("volume", 0))
+
+
 def get_today_volume(ticker: str, current_time: datetime = None) -> float:
     """获取今日同时段真实成交量（差分量）"""
     if current_time is None:
@@ -131,6 +142,12 @@ def get_day_volume(ticker: str, day: datetime) -> float:
     """获取指定日期同时段的真实成交量"""
     config = load_config()
     window = config.get("params", {}).get("volume_ratio_window", 5)
+
+    # US 市场：JSONL interval_vol 计算有 bug，改用日终总量
+    if ticker.endswith(".US"):
+        vol = get_last_day_volume(ticker, day)
+        if vol > 0:
+            return vol
 
     return get_interval_volume(ticker, day, window)
 
@@ -399,6 +416,24 @@ def compute_all() -> List[dict]:
                 r["price"] = api_prices[r["ticker"]]["price"]
                 r["change_pct"] = api_prices[r["ticker"]]["change_pct"]
 
+    # US 股票：WS PushQuote.volume 不是日累计，REST API 才有正确数据
+    us_tickers = [r["ticker"] for r in results if r["ticker"].endswith(".US")]
+    if us_tickers:
+        api_data = _fetch_price_from_api(us_tickers)
+        for r in results:
+            if r["ticker"] in api_data:
+                r["price"] = api_data[r["ticker"]]["price"]
+                r["change_pct"] = api_data[r["ticker"]]["change_pct"]
+                # US 用 REST API volume 作为 today_vol，同时覆盖 volume_avg5 用昨日日终量
+                api_vol = api_data[r["ticker"]]["volume"]
+                r["volume_today"] = api_vol
+                # ratio = today_vol / avg_5d_avg，重算 ratio
+                avg5 = r["volume_avg5"]
+                if avg5 > 0:
+                    r["ratio"] = round(api_vol / avg5, 2)
+                    r["signal"] = "正常" if r["ratio"] <= 1.2 else ("放量" if r["ratio"] <= 2.0 else ("显著放量" if r["ratio"] <= 5.0 else "巨量"))
+                    r["signal_detail"] = get_signal_detail(r["ratio"], r["change_pct"])
+
     return results
 
 
@@ -426,6 +461,15 @@ def _fetch_price_from_api(tickers: list) -> dict:
             config = Config.from_oauth(oauth)
             ctx = QuoteContext(config)
             quotes = ctx.quote(tickers)
+        except Exception:
+            # 确保 stdout 恢复
+            try:
+                sys.stdout = old_stdout
+                os.dup2(old_stdout_fd, 1)
+                os.close(old_stdout_fd)
+            except Exception:
+                pass
+            raise
         finally:
             sys.stdout = old_stdout
             os.dup2(old_stdout_fd, 1)
@@ -435,15 +479,9 @@ def _fetch_price_from_api(tickers: list) -> dict:
             last = float(q.last_done or 0)
             prev = float(q.prev_close or 0)
             change_pct = ((last - prev) / prev * 100) if prev > 0 else 0
-            result[q.symbol] = {"price": last, "change_pct": round(change_pct, 2)}
+            result[q.symbol] = {"price": last, "change_pct": round(change_pct, 2), "volume": int(q.volume)}
         return result
     except Exception as e:
-        try:
-            sys.stdout = old_stdout
-            os.dup2(old_stdout_fd, 1)
-            os.close(old_stdout_fd)
-        except Exception:
-            pass
         print(f"[compute] API 价格获取失败: {e}", flush=True)
         return {}
 
