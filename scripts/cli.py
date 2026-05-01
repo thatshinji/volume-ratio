@@ -270,7 +270,7 @@ def cmd_signals():
         direction = "↑" if change > 0 else "↓"
         dt = datetime.fromisoformat(ts).strftime("%H:%M:%S")
         ratio_display = format_ratio_display(ratio or 0)
-        src_label = "日内" if source == "intraday" else "5日"
+        src_label = "日内+5日" if source == "mixed" else ("日内" if source == "intraday" else "5日")
         print(f"  [{dt}] {ticker} {name} {direction}{abs(change):.1f}% {ratio_display} ({sig_type}) [{src_label}]")
 
     print(f"\n共 {len(rows)} 个信号")

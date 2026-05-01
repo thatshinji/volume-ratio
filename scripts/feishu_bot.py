@@ -235,7 +235,7 @@ def build_signals_card() -> dict:
         {"name": "time", "display_name": "时间", "width": "auto", "horizontal_align": "right", "data_type": "text"},
         {"name": "ticker", "display_name": "标的", "width": "auto", "horizontal_align": "left", "data_type": "text"},
         {"name": "change", "display_name": "涨跌", "width": "auto", "horizontal_align": "right", "data_type": "text"},
-        {"name": "ratio", "display_name": "量比", "width": "auto", "horizontal_align": "right", "data_type": "text"},
+        {"name": "ratio", "display_name": "触发量比", "width": "auto", "horizontal_align": "right", "data_type": "text"},
         {"name": "signal", "display_name": "信号", "width": "auto", "horizontal_align": "left", "data_type": "text"},
         {"name": "source", "display_name": "来源", "width": "auto", "horizontal_align": "center", "data_type": "text"},
     ]
@@ -243,10 +243,10 @@ def build_signals_card() -> dict:
     table_rows = []
     for ticker, name, sig_type, ratio, price, change, source, ts in rows:
         name = name or ticker
-        direction = "↑" if change > 0 else "↓"
+        direction = "↑" if change > 0 else ("↓" if change < 0 else "─")
         dt = datetime.fromisoformat(ts).strftime("%H:%M")
         ratio_display = format_ratio_display(ratio or 0)
-        src = "日内" if source == "intraday" else "5日"
+        src = "日内+5日" if source == "mixed" else ("日内" if source == "intraday" else "5日")
         table_rows.append({
             "time": dt,
             "ticker": f"{ticker}-{name}",

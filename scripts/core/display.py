@@ -48,25 +48,30 @@ def build_market_table(label: str, tickers: list) -> list:
         {"name": "ticker", "display_name": "标的", "width": "auto", "horizontal_align": "left", "data_type": "text"},
         {"name": "price", "display_name": "价格", "width": "auto", "horizontal_align": "right", "data_type": "text"},
         {"name": "change", "display_name": "涨跌", "width": "auto", "horizontal_align": "right", "data_type": "text"},
-        {"name": "ratio", "display_name": "量比", "width": "auto", "horizontal_align": "right", "data_type": "text"},
+        {"name": "ratio", "display_name": "5日量比", "width": "auto", "horizontal_align": "right", "data_type": "text"},
+        {"name": "intraday", "display_name": "日内", "width": "auto", "horizontal_align": "right", "data_type": "text"},
+        {"name": "samples", "display_name": "样本", "width": "auto", "horizontal_align": "right", "data_type": "text"},
         {"name": "status", "display_name": "状态", "width": "auto", "horizontal_align": "left", "data_type": "text"},
     ]
 
     rows = []
     for r in tickers[:MAX_PAGE_SIZE]:
         ratio = r.get("ratio", 0)
+        intraday_ratio = r.get("ratio_intraday", 0)
         change = r.get("change_pct", 0)
         name = r.get("name", r["ticker"])
         ticker = r["ticker"]
         price = r.get("price", 0)
-        direction = "↑" if change > 0 else "↓"
+        direction = "↑" if change > 0 else ("↓" if change < 0 else "─")
         ratio_display = format_ratio_display(ratio)
         emoji = "🔥" if ratio > 2.0 else ("⚠️" if ratio < 0.8 else "✅")
         rows.append({
             "ticker": f"{ticker}-{name}",
             "price": f"${price}",
             "change": f"{direction}{abs(change):.1f}%",
-            "ratio": f"{ratio:.1f}",
+            "ratio": f"{ratio:.2f}",
+            "intraday": f"{intraday_ratio:.2f}" if intraday_ratio else "-",
+            "samples": f"{r.get('historical_sample_days', 0)}/5",
             "status": f"{emoji} {ratio_display}",
         })
 

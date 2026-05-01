@@ -36,10 +36,9 @@ def _is_end_of_day(market: str) -> bool:
     if market != "CN":
         return False
     try:
-        import pytz
-        tz = pytz.timezone("Asia/Shanghai")
-        now = datetime.now(pytz.UTC).astimezone(tz)
-    except ImportError:
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    except Exception:
         now = datetime.now()
     return (now.hour == 14 and now.minute >= 30) or now.hour == 15
 
@@ -49,7 +48,9 @@ def _is_end_of_day(market: str) -> bool:
 PROMPT_ANALYSIS_TEMPLATE = """你是量比分析专家。给定以下数据：
 - 标的: {ticker}
 - 当前价: {price} ({change_pct:+.2f}%)
-- 量比: {ratio}
+- 信号来源: {source_label}
+- 5日历史同期量比: {historical_ratio}
+- 日内滚动量比: {intraday_ratio}
 - 近5日均量: {avg_vol}
 - 近期走势: {recent_action}
 
@@ -102,32 +103,39 @@ def detect_signals(results: List[dict]) -> List[dict]:
             continue
         name = r.get("name", ticker)
         ratio = r.get("ratio", 0)
+        ratio_intraday = r.get("ratio_intraday", 0)
         change_pct = r.get("change_pct", 0)
         signal = r.get("signal", "")
         signal_detail = r.get("signal_detail", "")
+        data_quality = r.get("data_quality", "")
+        historical_sample_days = r.get("historical_sample_days", 0)
+        historical_ready = data_quality == "ok" and not str(signal).startswith("样本不足")
 
         # === Historical 路径（5日历史量比）===
         triggered = []
-        for sig_name, rule in SIGNAL_RULES.items():
-            if rule(ratio, change_pct):
-                triggered.append(sig_name)
+        if historical_ready:
+            for sig_name, rule in SIGNAL_RULES.items():
+                if rule(ratio, change_pct):
+                    triggered.append(sig_name)
 
         # 尾盘放量（仅 CN 市场 14:30-15:00）
-        if not triggered and ratio > 1.5 and _is_end_of_day(market):
+        if historical_ready and not triggered and ratio > 1.5 and _is_end_of_day(market):
             triggered.append("尾盘放量")
 
         # 阈值检查（仅在 SIGNAL_RULES 未匹配时）
-        if not triggered and signal != "数据不足":
+        if historical_ready and not triggered:
             if ratio > alert_threshold:
                 triggered.append(f"放量(>{alert_threshold})")
             elif ratio < shrink_threshold:
                 triggered.append(f"缩量(<{shrink_threshold})")
 
-        if triggered or signal_detail:
+        if triggered or (historical_ready and signal_detail):
             alerts.append({
                 "ticker": ticker,
                 "name": name,
                 "ratio": ratio,
+                "historical_ratio": ratio,
+                "intraday_ratio": ratio_intraday,
                 "change_pct": change_pct,
                 "price": r.get("price", 0),
                 "signal": signal,
@@ -135,11 +143,10 @@ def detect_signals(results: List[dict]) -> List[dict]:
                 "triggered_signals": triggered,
                 "source": "historical",
                 "volume_avg5": r.get("volume_avg5", 0),
-                "historical_sample_days": r.get("historical_sample_days", 0),
+                "historical_sample_days": historical_sample_days,
             })
 
         # === Intraday 路径（滚动量比 + 三条件）===
-        ratio_intraday = r.get("ratio_intraday", 0)
         signal_intraday = r.get("signal_intraday", "")
         cond_vol = r.get("cond_vol", False)
         cond_stop = r.get("cond_stop", False)
@@ -150,6 +157,8 @@ def detect_signals(results: List[dict]) -> List[dict]:
                 "ticker": ticker,
                 "name": name,
                 "ratio": ratio_intraday,
+                "historical_ratio": ratio,
+                "intraday_ratio": ratio_intraday,
                 "change_pct": change_pct,
                 "price": r.get("price", 0),
                 "signal": "放量止跌",
@@ -157,13 +166,15 @@ def detect_signals(results: List[dict]) -> List[dict]:
                 "triggered_signals": ["放量止跌"],
                 "source": "intraday",
                 "volume_avg5": r.get("volume_avg5", 0),
-                "historical_sample_days": r.get("historical_sample_days", 0),
+                "historical_sample_days": historical_sample_days,
             })
         elif signal_intraday == "放量":
             alerts.append({
                 "ticker": ticker,
                 "name": name,
                 "ratio": ratio_intraday,
+                "historical_ratio": ratio,
+                "intraday_ratio": ratio_intraday,
                 "change_pct": change_pct,
                 "price": r.get("price", 0),
                 "signal": "放量",
@@ -171,7 +182,7 @@ def detect_signals(results: List[dict]) -> List[dict]:
                 "triggered_signals": ["放量"],
                 "source": "intraday",
                 "volume_avg5": r.get("volume_avg5", 0),
-                "historical_sample_days": r.get("historical_sample_days", 0),
+                "historical_sample_days": historical_sample_days,
             })
 
     # 保存配置（仅在移除过期 mute 时）
@@ -222,6 +233,9 @@ def merge_alerts(existing: dict, incoming: dict) -> dict:
     # 卡片主量比取更强的一路；历史均量等辅助字段保留已有值。
     if incoming.get("ratio", 0) > existing.get("ratio", 0):
         merged["ratio"] = incoming.get("ratio", 0)
+    merged["historical_ratio"] = max(existing.get("historical_ratio", 0), incoming.get("historical_ratio", 0))
+    merged["intraday_ratio"] = max(existing.get("intraday_ratio", 0), incoming.get("intraday_ratio", 0))
+    merged["historical_sample_days"] = max(existing.get("historical_sample_days", 0), incoming.get("historical_sample_days", 0))
     return merged
 
 
@@ -230,12 +244,14 @@ def format_alert_card(alert: dict, analysis: Optional[str] = None) -> dict:
     ticker = alert["ticker"]
     name = alert.get("name", ticker)
     ratio = alert["ratio"]
+    historical_ratio = alert.get("historical_ratio", 0)
+    intraday_ratio = alert.get("intraday_ratio", 0)
     change = alert["change_pct"]
     price = alert["price"]
     signals = ", ".join(alert["triggered_signals"]) or alert["signal_detail"] or alert["signal"]
     source = alert.get("source", "historical")
 
-    direction = "↑" if change > 0 else "↓"
+    direction = "↑" if change > 0 else ("↓" if change < 0 else "─")
     ratio_display = format_ratio_display(ratio)
     type_label = "日内+5日" if source == "mixed" else ("日内" if source == "intraday" else "5日")
     # 信号显示加方向（如"放量 ↑" 或 "缩量 ↓"）
@@ -260,10 +276,18 @@ def format_alert_card(alert: dict, analysis: Optional[str] = None) -> dict:
     # 内容
     lines = [
         f"**当前价:** ${price} ({direction}{abs(change):.2f}%)",
-        f"**量比:** {ratio:.2f} {ratio_display}",
+        f"**主触发量比:** {ratio:.2f} {ratio_display}",
         f"**信号:** {signal_display}",
         f"**时间:** {datetime.now().strftime('%H:%M:%S')}",
     ]
+    sample_days = alert.get("historical_sample_days", 0)
+    if source in ("historical", "mixed") or historical_ratio > 0:
+        hist_text = f"{historical_ratio:.2f} {format_ratio_display(historical_ratio)}" if historical_ratio > 0 else "数据不足"
+        lines.insert(3, f"**5日量比:** {hist_text}（样本 {sample_days}/5）")
+    if source in ("intraday", "mixed") or intraday_ratio > 0:
+        intraday_text = f"{intraday_ratio:.2f} {format_ratio_display(intraday_ratio)}" if intraday_ratio > 0 else "数据不足"
+        insert_at = 4 if any(line.startswith("**5日量比:**") for line in lines) else 3
+        lines.insert(insert_at, f"**日内量比:** {intraday_text}")
     if analysis:
         lines.append("")
         lines.append(f"**LLM分析:** {analysis}")
@@ -336,22 +360,31 @@ def get_llm_analysis(prompt: str) -> Optional[str]:
 
 def generate_llm_prompt(ticker: str, ratio: float, price: float,
                         change_pct: float, avg_vol: float,
-                        recent_action: str = "") -> str:
+                        recent_action: str = "", source_label: str = "",
+                        historical_ratio: float = 0, intraday_ratio: float = 0) -> str:
     """生成 LLM 分析 prompt"""
     return PROMPT_ANALYSIS_TEMPLATE.format(
         ticker=ticker, price=price, change_pct=change_pct,
         ratio=ratio, avg_vol=avg_vol, recent_action=recent_action,
+        source_label=source_label,
+        historical_ratio=historical_ratio,
+        intraday_ratio=intraday_ratio,
     )
 
 
 def analyze_alert_with_llm(alert: dict, avg_vol: float) -> Optional[str]:
     """对触发信号的标的调用 LLM 分析"""
+    source = alert.get("source", "")
+    source_label = "日内+5日" if source == "mixed" else ("日内" if source == "intraday" else "5日")
     prompt = generate_llm_prompt(
         ticker=alert["ticker"],
         ratio=alert["ratio"],
         price=alert["price"],
         change_pct=alert["change_pct"],
         avg_vol=avg_vol,
+        source_label=source_label,
+        historical_ratio=alert.get("historical_ratio", 0),
+        intraday_ratio=alert.get("intraday_ratio", 0),
     )
     return get_llm_analysis(prompt)
 
