@@ -487,6 +487,18 @@ def scan_and_alert():
     lock_file = ROOT / "logs" / "alert.lock"
     lock_file.parent.mkdir(exist_ok=True)
     pending_alerts = []
+
+    # 先做市场检查和数据计算（含网络 I/O），锁外执行避免阻塞后续 cron。
+    config = load_config()
+    tickers = get_all_tickers(config)
+    active_markets = {get_market(t) for t in tickers}
+    if not any(is_market_trading(market) for market in active_markets):
+        print("[alert] 当前无开盘市场，跳过扫描")
+        return
+
+    results = compute_all()
+    alerts = detect_signals(results)
+
     with open(lock_file, "a+") as lf:
         try:
             fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -497,16 +509,6 @@ def scan_and_alert():
         except BlockingIOError:
             print("[alert] 上一次扫描仍在运行，跳过本轮")
             return
-
-        config = load_config()
-        tickers = get_all_tickers(config)
-        active_markets = {get_market(t) for t in tickers}
-        if not any(is_market_trading(market) for market in active_markets):
-            print("[alert] 当前无开盘市场，跳过扫描")
-            return
-
-        results = compute_all()
-        alerts = detect_signals(results)
 
         if not alerts:
             print(f"[alert] 无触发信号，共扫描 {len(results)} 个标的")

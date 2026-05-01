@@ -73,7 +73,7 @@ def check_and_launch():
     pid = os.fork()
     if pid > 0:
         # 等待子进程完成 fork，确保 PID 文件写入
-        time.sleep(0.5)
+        time.sleep(1)
         return
 
     # 子进程：创建新 session 成为后台进程

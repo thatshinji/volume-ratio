@@ -13,6 +13,7 @@ from .silence import suppress_stdout
 _trading_days_cache = {}
 # 指定区间交易日缓存: {(market, start, end): trading_days_set}
 _trading_days_range_cache = {}
+_TRADING_DAYS_CACHE_MAX = 64
 # 交易日查找缓存: {market: (start, end, trading_days_set)}
 _trading_days_lookup_cache = {}
 
@@ -56,6 +57,8 @@ def _fetch_trading_days(market: str, start: date, end: date) -> set:
         else:
             days = set(raw_days or [])
         _trading_days_range_cache[cache_key] = days
+        while len(_trading_days_range_cache) > _TRADING_DAYS_CACHE_MAX:
+            _trading_days_range_cache.pop(next(iter(_trading_days_range_cache)))
         return days
     except BaseException as e:
         if isinstance(e, (KeyboardInterrupt, SystemExit)):

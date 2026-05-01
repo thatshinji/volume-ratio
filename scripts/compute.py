@@ -916,7 +916,11 @@ def save_quote_minute_bar(
             execute(conn)
         _clear_bar_caches(ticker)
     except sqlite3.Error:
-        pass
+        if conn is not None:
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
 
 
 def save_quote_snapshot(ticker: str, data: dict, source: str = "websocket"):
@@ -995,9 +999,9 @@ def save_ratio(result: dict):
                 int(bool(result.get("cond_stable", False))),
                 result.get("data_quality", ""),
             ))
+        _last_ratio_write[ticker] = now
     except sqlite3.Error:
         pass
-    _last_ratio_write[ticker] = now
 
 
 def save_signal(ticker: str, name: str, signal_type: str, ratio: float,

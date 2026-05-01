@@ -80,7 +80,7 @@ def check_and_launch():
 
     pid = os.fork()
     if pid > 0:
-        time.sleep(0.5)
+        time.sleep(1)
         return
 
     # 子进程

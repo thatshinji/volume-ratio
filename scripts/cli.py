@@ -381,12 +381,16 @@ def cmd_remove_ticker(ticker: str):
 def cmd_mute(ticker: str, duration: str):
     """静默指定标的"""
     # 解析时长 (2h, 30m, etc.)
-    if duration.endswith("h"):
-        hours = float(duration[:-1])
-    elif duration.endswith("m"):
-        hours = float(duration[:-1]) / 60
-    else:
-        hours = float(duration)
+    try:
+        if duration.endswith("h"):
+            hours = float(duration[:-1])
+        elif duration.endswith("m"):
+            hours = float(duration[:-1]) / 60
+        else:
+            hours = float(duration)
+    except ValueError:
+        print(f"无效时长: {duration}（示例: 2h, 30m, 1.5）")
+        return
 
     until = datetime.now() + timedelta(hours=hours)
 

@@ -717,8 +717,17 @@ def handle_card_action(data) -> "P2CardActionTriggerResponse":
         P2CardActionTriggerResponse, CallBackToast, CallBackCard,
     )
 
-    action = data.event.action
-    value = action.value or {}
+    try:
+        action = data.event.action
+        value = action.value or {}
+    except AttributeError as e:
+        print(f"[bot] 卡片回调数据异常: {e}", flush=True)
+        resp = P2CardActionTriggerResponse()
+        resp.toast = CallBackToast()
+        resp.toast.type = "error"
+        resp.toast.content = "操作数据异常"
+        return resp
+
     action_type = value.get("action", "")
 
     if action_type == "remove":
@@ -797,7 +806,12 @@ def handle_card_action(data) -> "P2CardActionTriggerResponse":
         resp.card.data = build_allstock_card()
         return resp
 
-    return None
+    print(f"[bot] 未知卡片操作: {action_type}", flush=True)
+    resp = P2CardActionTriggerResponse()
+    resp.toast = CallBackToast()
+    resp.toast.type = "info"
+    resp.toast.content = "未知操作"
+    return resp
 
 
 def _check_component_status() -> dict:
@@ -1189,7 +1203,6 @@ def main():
     def signal_handler(signum, frame):
         print("\n[bot] 收到退出信号，正在关闭...", flush=True)
         running.clear()
-        sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
