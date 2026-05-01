@@ -23,7 +23,12 @@ def remove_cron(keyword: str):
     new_lines = [line for line in lines if keyword not in line]
     new_cron = "\n".join(new_lines)
 
-    subprocess.run(["crontab", "-"], input=new_cron.encode(), capture_output=True, timeout=30)
+    result = subprocess.run(["crontab", "-"], input=new_cron, capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        print(f"[stop] cron 移除失败: {keyword[:50]}...")
+        if result.stderr:
+            print(f"  {result.stderr.strip()}")
+        return
     print(f"[stop] 已移除 cron: {keyword[:50]}...")
 
 

@@ -34,7 +34,8 @@ MARKET_TZ = {
     "HK": ZoneInfo("Asia/Hong_Kong"),
     "US": ZoneInfo("America/New_York"),
 }
-LOCAL_TZ = datetime.now().astimezone().tzinfo
+def _local_tz():
+    return datetime.now().astimezone().tzinfo
 
 DEFAULT_HISTORY_DAYS = 5
 INTRADAY_SIGNAL_WINDOW_MINUTES = 5
@@ -84,7 +85,7 @@ def parse_timestamp(ts: str) -> Optional[datetime]:
     except (ValueError, AttributeError):
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=LOCAL_TZ)
+        dt = dt.replace(tzinfo=_local_tz())
     return dt
 
 
@@ -94,7 +95,7 @@ def _market_tz(market: str) -> ZoneInfo:
 
 def _to_market_dt(dt: datetime, market: str) -> datetime:
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=LOCAL_TZ)
+        dt = dt.replace(tzinfo=_local_tz())
     return dt.astimezone(_market_tz(market))
 
 

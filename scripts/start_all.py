@@ -34,8 +34,7 @@ def add_cron(line: str):
 def start_websocket():
     """通过 launcher 启动或确认 WebSocket 采集进程。"""
     launcher = SCRIPTS_DIR / "collect_ws_launcher.py"
-    python_bin = "/usr/bin/python3"
-    subprocess.run([python_bin, str(launcher)], check=False)
+    subprocess.run([sys.executable, str(launcher)], check=False)
     pid_file = LOG_DIR / "ws_collect.pid"
     if pid_file.exists():
         print(f"[start] WebSocket PID: {pid_file.read_text().strip()}")
@@ -64,7 +63,7 @@ def main():
     alert_script = SCRIPTS_DIR / "alert.py"
     cleanup_script = SCRIPTS_DIR / "cleanup.py"
     python_bin = str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
-    launcher_python = "/usr/bin/python3"  # launcher 必须用系统 Python（longbridge 未装在 venv）
+    launcher_python = sys.executable
 
     sync_script = SCRIPTS_DIR / "longbridge_sync.py"
 

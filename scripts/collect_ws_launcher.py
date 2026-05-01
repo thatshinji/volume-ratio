@@ -83,9 +83,6 @@ def check_and_launch():
     if pid > 0:
         sys.exit(0)
 
-    # 孙子进程：写入自己的 PID（而非中间进程的 PID）
-    PID_FILE.write_text(str(os.getpid()))
-
     # 重定向标准 IO
     devnull = os.open(os.devnull, os.O_RDONLY)
     os.dup2(devnull, sys.stdin.fileno())

@@ -195,34 +195,43 @@ def fetch_other_groups(exclude_names: list = None) -> dict:
 
 
 def _restart_websocket():
-    """重启 WebSocket 采集进程"""
-    import subprocess, os, time, signal
-    pid_file = ROOT / "logs" / "ws_collect.pid"
-    try:
-        if pid_file.exists():
-            old_pid = int(pid_file.read_text().strip())
-            os.kill(old_pid, signal.SIGTERM)
-            deadline = time.time() + 8
-            while time.time() < deadline:
-                try:
-                    os.kill(old_pid, 0)
-                except OSError:
-                    break
-                time.sleep(0.2)
-            else:
-                os.kill(old_pid, signal.SIGKILL)
-                time.sleep(1)
-    except (ValueError, OSError):
-        pass
+    """重启 WebSocket 采集进程（加锁防止并发重启互杀）"""
+    import subprocess, os, time, signal, fcntl
+    lock_path = ROOT / "logs" / "ws_restart.lock"
+    lock_path.parent.mkdir(exist_ok=True)
+    with open(lock_path, "a+") as lf:
+        try:
+            fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("[sync] WebSocket 重启已在进行，跳过", flush=True)
+            return
 
-    # 重启 WS 采集
-    with open(os.devnull, "w") as devnull:
-        subprocess.Popen(
-            [sys.executable, str(ROOT / "scripts" / "collect_ws.py"), "--daemon"],
-            stdout=devnull,
-            stderr=devnull,
-        )
-    print("[sync] WebSocket 采集已重启", flush=True)
+        pid_file = ROOT / "logs" / "ws_collect.pid"
+        try:
+            if pid_file.exists():
+                old_pid = int(pid_file.read_text().strip())
+                os.kill(old_pid, signal.SIGTERM)
+                deadline = time.time() + 8
+                while time.time() < deadline:
+                    try:
+                        os.kill(old_pid, 0)
+                    except OSError:
+                        break
+                    time.sleep(0.2)
+                else:
+                    os.kill(old_pid, signal.SIGKILL)
+                    time.sleep(1)
+        except (ValueError, OSError):
+            pass
+
+        # 重启 WS 采集
+        with open(os.devnull, "w") as devnull:
+            subprocess.Popen(
+                [sys.executable, str(ROOT / "scripts" / "collect_ws.py"), "--daemon"],
+                stdout=devnull,
+                stderr=devnull,
+            )
+        print("[sync] WebSocket 采集已重启", flush=True)
 
 
 def run_sync(groups: list = None, restart_ws: bool = True) -> dict:

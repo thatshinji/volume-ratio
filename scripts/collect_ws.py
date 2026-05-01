@@ -318,6 +318,10 @@ if __name__ == "__main__":
     if not acquire_instance_lock():
         sys.exit(0)
 
+    pid_file = ROOT / "logs" / "ws_collect.pid"
+    pid_file.parent.mkdir(exist_ok=True)
+    pid_file.write_text(str(os.getpid()))
+
     print(f"[ws] 守护进程启动，PID: {os.getpid()}", flush=True)
 
     run_websocket()
