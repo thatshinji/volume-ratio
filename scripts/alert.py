@@ -486,6 +486,7 @@ def scan_and_alert():
 
     lock_file = ROOT / "logs" / "alert.lock"
     lock_file.parent.mkdir(exist_ok=True)
+    pending_alerts = []
     with open(lock_file, "a+") as lf:
         try:
             fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -513,16 +514,11 @@ def scan_and_alert():
 
         print(f"[alert] 检测到 {len(alerts)} 个信号，开始去重判断...")
 
-        # LLM 调用限制：只对强信号调用，同一 ticker 只调一次
-        seen_tickers = set()
-        pushed_count = 0
-
         for alert in alerts:
             ticker = alert.get("ticker", "")
             ratio = alert.get("ratio", 0)
             signal = alert.get("signal", "")
             signal_detail = alert.get("signal_detail", "")
-            source = alert.get("source", "historical")
 
             # 确定信号状态
             special_signals = ("放量止跌", "放量突破", "放量下跌", "缩量止跌")
@@ -545,45 +541,51 @@ def scan_and_alert():
 
             # 更新状态
             update_signal_state(ticker, new_state)
+            alert["_new_state"] = new_state
+            alert["_effective_signal"] = effective_signal
+            pending_alerts.append(alert)
 
-            # 判断是否需要 LLM 分析
-            is_significant = (
-                effective_signal in ("放量突破", "放量下跌") or
-                (ratio > 2.5 and alert.get("change_pct", 0) != 0)
-            )
+    # LLM 和飞书网络请求放到锁外，避免慢 API 阻塞下一轮 cron 扫描。
+    seen_tickers = set()
+    pushed_count = 0
+    for alert in pending_alerts:
+        ticker = alert.get("ticker", "")
+        ratio = alert.get("ratio", 0)
+        source = alert.get("source", "historical")
+        new_state = alert.get("_new_state", "")
+        effective_signal = alert.get("_effective_signal", "")
 
-            if ticker in seen_tickers:
-                analysis = None
-            elif is_significant:
-                avg_vol = alert.get("volume_avg5", 0)
-                analysis = analyze_alert_with_llm(alert, avg_vol)
-                seen_tickers.add(ticker)
-            else:
-                analysis = None
+        is_significant = (
+            effective_signal in ("放量突破", "放量下跌") or
+            (ratio > 2.5 and alert.get("change_pct", 0) != 0)
+        )
 
-            # 保存信号记录
-            name = alert.get("name", ticker)
-            save_signal(
-                ticker=ticker, name=name, signal_type=new_state,
-                ratio=ratio, price=alert.get("price", 0),
-                change_pct=alert.get("change_pct", 0), source=source,
-                llm_analysis=analysis or "", notified=1,
-            )
+        if ticker in seen_tickers:
+            analysis = None
+        elif is_significant:
+            avg_vol = alert.get("volume_avg5", 0)
+            analysis = analyze_alert_with_llm(alert, avg_vol)
+            seen_tickers.add(ticker)
+        else:
+            analysis = None
 
-            # 推送
-            card = format_alert_card(alert, analysis)
-            # 同时打印文本日志
-            ticker = alert["ticker"]
-            name = alert.get("name", ticker)
-            ratio = alert["ratio"]
-            change = float(alert.get("change_pct") or 0)
-            direction = "↑" if change > 0 else ("↓" if change < 0 else "─")
-            print(f"[alert] {ticker}-{name} {direction}{abs(change):.2f}% 量比{ratio:.2f} {alert.get('source','')}")
-            send_feishu_card(card)
-            pushed_count += 1
-            print("---")
+        name = alert.get("name", ticker)
+        save_signal(
+            ticker=ticker, name=name, signal_type=new_state,
+            ratio=ratio, price=alert.get("price", 0),
+            change_pct=alert.get("change_pct", 0), source=source,
+            llm_analysis=analysis or "", notified=1,
+        )
 
-        print(f"[alert] 推送完成: {pushed_count}/{len(alerts)} 个信号")
+        card = format_alert_card(alert, analysis)
+        change = float(alert.get("change_pct") or 0)
+        direction = "↑" if change > 0 else ("↓" if change < 0 else "─")
+        print(f"[alert] {ticker}-{name} {direction}{abs(change):.2f}% 量比{ratio:.2f} {source}")
+        send_feishu_card(card)
+        pushed_count += 1
+        print("---")
+
+    print(f"[alert] 推送完成: {pushed_count}/{len(pending_alerts)} 个信号")
 
 
 def send_brief_report():

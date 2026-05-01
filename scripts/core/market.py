@@ -60,6 +60,7 @@ def _fetch_trading_days(market: str, start: date, end: date) -> set:
     except BaseException as e:
         if isinstance(e, (KeyboardInterrupt, SystemExit)):
             raise
+        print(f"[market] trading_days 查询失败 {market} {start}~{end}: {type(e).__name__}: {e}", flush=True)
         return set()
 
 

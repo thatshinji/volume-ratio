@@ -62,6 +62,8 @@ def acquire_instance_lock() -> bool:
         return True
     except BlockingIOError:
         print("[bot] 已有飞书机器人实例运行，当前进程退出", flush=True)
+        _instance_lock_file.close()
+        _instance_lock_file = None
         return False
 
 
@@ -904,37 +906,59 @@ def build_stop_card() -> dict:
     }
 
 
+def run_service_command_async(
+    client: lark.Client,
+    chat_id: str,
+    script_name: str,
+    success_card_builder=None,
+    timeout_text: str = "执行超时（>60秒），请检查日志",
+    error_prefix: str = "执行失败",
+    delay_seconds: float = 0,
+):
+    """后台执行服务管理脚本，避免阻塞飞书 WebSocket 事件回调。"""
+    def worker():
+        try:
+            if delay_seconds > 0:
+                time.sleep(delay_seconds)
+            subprocess.run(
+                [sys.executable, str(ROOT / "scripts" / script_name)],
+                capture_output=True, text=True, timeout=60
+            )
+            if success_card_builder:
+                send_card(client, chat_id, success_card_builder())
+        except subprocess.TimeoutExpired:
+            send_text(client, chat_id, timeout_text)
+        except Exception as e:
+            send_text(client, chat_id, f"{error_prefix}: {e}")
+
+    thread = threading.Thread(target=worker, name=f"bot-{script_name}", daemon=True)
+    thread.start()
+
+
 def handle_command(client: lark.Client, chat_id: str, text: str):
     """处理用户指令"""
     text = text.strip()
     print(f"[bot] 收到指令: {text}", flush=True)
 
     if text == "/start":
-        try:
-            subprocess.run(
-                [sys.executable, str(ROOT / "scripts" / "start_all.py")],
-                capture_output=True, text=True, timeout=60
-            )
-            card = build_start_card()
-            send_card(client, chat_id, card)
-        except subprocess.TimeoutExpired:
-            send_text(client, chat_id, "启动超时（>60秒），请检查日志")
-        except Exception as e:
-            send_text(client, chat_id, f"启动失败: {e}")
+        run_service_command_async(
+            client, chat_id, "start_all.py",
+            success_card_builder=build_start_card,
+            timeout_text="启动超时（>60秒），请检查日志",
+            error_prefix="启动失败",
+        )
 
     elif text == "/stop":
         try:
             # 先发送结果卡片，再执行关停（因为关停会杀掉机器人自身）
             card = build_stop_card()
             send_card(client, chat_id, card)
-            import time
-            time.sleep(1)  # 等待卡片发送完成
-            subprocess.run(
-                [sys.executable, str(ROOT / "scripts" / "stop_all.py")],
-                capture_output=True, text=True, timeout=60
+            run_service_command_async(
+                client, chat_id, "stop_all.py",
+                timeout_text="关停超时（>60秒），请检查日志",
+                error_prefix="关停失败",
+                delay_seconds=1,
             )
-        except subprocess.TimeoutExpired:
-            send_text(client, chat_id, "关停超时（>60秒），请检查日志")
         except Exception as e:
             send_text(client, chat_id, f"关停失败: {e}")
 

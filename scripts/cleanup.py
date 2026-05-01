@@ -103,8 +103,11 @@ def cleanup_old_json_snapshots(market: str, keep_days: int):
             continue
         day_str = parts[1] if len(parts) >= 2 else ""
         if day_str < cutoff_str:
-            f.unlink()
-            removed += 1
+            try:
+                f.unlink()
+                removed += 1
+            except OSError as e:
+                print(f"[cleanup] 跳过已变化的旧格式文件 {f.name}: {e}")
 
     if removed > 0:
         print(f"[cleanup] {market} JSON: 删除 {removed} 个过期旧格式文件")

@@ -5,12 +5,16 @@
 支持热加载：修改 config.yaml 后自动生效，无需重启进程
 """
 
+import fcntl
+import os
+
 import yaml
 from pathlib import Path
 from typing import Tuple
 
 ROOT = Path(__file__).parent.parent.parent
 CONFIG_PATH = ROOT / "config.yaml"
+CONFIG_LOCK_PATH = ROOT / "logs" / "config.lock"
 
 # 热加载缓存
 _config_cache = None
@@ -32,15 +36,30 @@ def load_config() -> dict:
 
 
 def save_config(config: dict):
-    """写入 config.yaml 并同步刷新本进程缓存。"""
+    """原子写入 config.yaml，并同步刷新本进程缓存。"""
     global _config_cache, _config_mtime
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        yaml.dump(config, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
-    try:
-        _config_mtime = CONFIG_PATH.stat().st_mtime
-    except OSError:
-        _config_mtime = 0
-    _config_cache = config
+    CONFIG_LOCK_PATH.parent.mkdir(exist_ok=True)
+    tmp_path = CONFIG_PATH.with_name(f"{CONFIG_PATH.name}.tmp")
+    with open(CONFIG_LOCK_PATH, "a+") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                yaml.dump(config, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, CONFIG_PATH)
+            try:
+                _config_mtime = CONFIG_PATH.stat().st_mtime
+            except OSError:
+                _config_mtime = 0
+            _config_cache = config
+        finally:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
 def remove_ticker_from_config(ticker: str) -> bool:

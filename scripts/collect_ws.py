@@ -112,7 +112,7 @@ def on_quote(symbol: str, quote):
             _quote_count += 1
             _active_tickers.add(symbol)
         quote_queue.put((symbol, data))
-    except (OSError, ValueError, KeyError) as e:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
         print(f"[ws] on_quote error: {e}", flush=True)
         traceback.print_exc()
 
@@ -149,6 +149,26 @@ def save_snapshot(ticker: str, data: dict):
         print(f"[ws] 已写入 {_saved_count} 条快照，最近 {ticker} -> {filepath.name}", flush=True)
 
 
+def drain_quote_queue():
+    """退出前尽量写完已入队行情，降低最后一条 JSONL 半写/丢失概率。"""
+    drained = 0
+    while True:
+        try:
+            symbol, data = quote_queue.get_nowait()
+        except queue.Empty:
+            break
+        try:
+            save_snapshot(symbol, data)
+            drained += 1
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+            print(f"[ws] 退出前写入队列失败: {e}", flush=True)
+            traceback.print_exc()
+        finally:
+            quote_queue.task_done()
+    if drained:
+        print(f"[ws] 退出前补写 {drained} 条队列行情", flush=True)
+
+
 def acquire_instance_lock() -> bool:
     """确保只有一个 WebSocket 采集实例运行。"""
     global _instance_lock_file
@@ -164,6 +184,8 @@ def acquire_instance_lock() -> bool:
         return True
     except BlockingIOError:
         print("[ws] 已有采集实例运行，当前进程退出", flush=True)
+        _instance_lock_file.close()
+        _instance_lock_file = None
         return False
 
 
@@ -213,8 +235,7 @@ def run_websocket():
                     # 定期清理 prev_close 缓存，防止无限增长
                     with _cache_lock:
                         should_clean = (_quote_count % _CACHE_CLEAN_INTERVAL == 0)
-                    if should_clean:
-                        with _cache_lock:
+                        if should_clean:
                             # 只保留最近有行情的 ticker
                             for k in list(_prev_close_cache.keys()):
                                 if k not in _active_tickers:
@@ -227,6 +248,7 @@ def run_websocket():
                     traceback.print_exc()
 
             # running 被清除，正常退出
+            drain_quote_queue()
             return
 
         except (OSError, ConnectionError, TimeoutError) as e:
@@ -258,7 +280,6 @@ def run_websocket():
 def signal_handler(signum, frame):
     print("\n[ws] 收到退出信号，正在关闭...", flush=True)
     running.clear()
-    sys.exit(0)
 
 
 if __name__ == "__main__":

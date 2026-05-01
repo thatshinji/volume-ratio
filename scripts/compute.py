@@ -42,11 +42,22 @@ INTRADAY_BASELINE_MINUTES = 30
 MIN_HISTORY_SAMPLES = 3
 RATIO_WRITE_INTERVAL = 300
 
+MAX_SNAPSHOT_CACHE_ITEMS = 128
+MAX_MINUTE_BAR_CACHE_ITEMS = 128
+MAX_PRESENCE_CACHE_ITEMS = 512
+
 _snapshot_cache = {}
 _minute_bar_cache = {}
 _minute_bar_presence_cache = {}
 _last_ratio_write = {}
 _db_initialized = False
+
+
+def _cache_put(cache: dict, key, value, max_items: int):
+    """Small FIFO cache cap for long-running bot processes."""
+    cache[key] = value
+    while len(cache) > max_items:
+        cache.pop(next(iter(cache)))
 
 
 @dataclass
@@ -225,14 +236,14 @@ def _ticker_has_minute_bars(ticker: str) -> bool:
     try:
         with sqlite3.connect(get_db_path(), timeout=30) as conn:
             if not _minute_bar_table_exists(conn):
-                _minute_bar_presence_cache[ticker] = False
+                _cache_put(_minute_bar_presence_cache, ticker, False, MAX_PRESENCE_CACHE_ITEMS)
                 return False
             row = conn.execute(
                 "SELECT 1 FROM quote_minute_bars WHERE ticker = ? LIMIT 1",
                 (ticker,),
             ).fetchone()
             has_rows = row is not None
-            _minute_bar_presence_cache[ticker] = has_rows
+            _cache_put(_minute_bar_presence_cache, ticker, has_rows, MAX_PRESENCE_CACHE_ITEMS)
             return has_rows
     except sqlite3.Error:
         return False
@@ -255,7 +266,7 @@ def read_minute_bars(ticker: str, target_date: date = None) -> list[SnapshotReco
         with sqlite3.connect(get_db_path(), timeout=30) as conn:
             conn.row_factory = sqlite3.Row
             if not _minute_bar_table_exists(conn):
-                _minute_bar_cache[cache_key] = []
+                _cache_put(_minute_bar_cache, cache_key, [], MAX_MINUTE_BAR_CACHE_ITEMS)
                 return []
             rows = conn.execute(
                 f"""
@@ -271,9 +282,9 @@ def read_minute_bars(ticker: str, target_date: date = None) -> list[SnapshotReco
         return []
 
     records = [rec for row in rows if (rec := _row_to_record(row))]
-    _minute_bar_cache[cache_key] = records
+    _cache_put(_minute_bar_cache, cache_key, records, MAX_MINUTE_BAR_CACHE_ITEMS)
     if records:
-        _minute_bar_presence_cache[ticker] = True
+        _cache_put(_minute_bar_presence_cache, ticker, True, MAX_PRESENCE_CACHE_ITEMS)
     return records
 
 
@@ -285,7 +296,13 @@ def read_market_snapshots(ticker: str, target_date: date = None) -> list[Snapsho
 
     market = get_market(ticker)
     cache_key = (ticker, target_date.isoformat() if target_date else "*")
-    mtimes = tuple((p, p.stat().st_mtime_ns) for p in _snapshot_files(ticker))
+    mtimes = []
+    for p in _snapshot_files(ticker):
+        try:
+            mtimes.append((p, p.stat().st_mtime_ns))
+        except OSError:
+            continue
+    mtimes = tuple(mtimes)
     cached = _snapshot_cache.get(cache_key)
     if cached and cached[0] == mtimes:
         return cached[1]
@@ -317,7 +334,7 @@ def read_market_snapshots(ticker: str, target_date: date = None) -> list[Snapsho
             continue
 
     records.sort(key=lambda r: r.market_ts)
-    _snapshot_cache[cache_key] = (mtimes, records)
+    _cache_put(_snapshot_cache, cache_key, (mtimes, records), MAX_SNAPSHOT_CACHE_ITEMS)
     return records
 
 
@@ -574,11 +591,14 @@ def calc_intraday_ratio_detail(ticker: str, current_time: datetime = None) -> di
     cond_stop = False
     cond_stable = False
     if signal_recs and baseline_recs:
-        base_low = min((r.low or r.price) for r in baseline_recs if (r.low or r.price) > 0)
-        sig_low = min((r.low or r.price) for r in signal_recs if (r.low or r.price) > 0)
+        base_prices = [(r.low or r.price) for r in baseline_recs if (r.low or r.price) > 0]
+        sig_prices = [(r.low or r.price) for r in signal_recs if (r.low or r.price) > 0]
         latest_price = signal_recs[-1].price
-        cond_stop = sig_low >= base_low * 0.995
-        cond_stable = latest_price > sig_low * 1.005
+        if base_prices and sig_prices and latest_price > 0:
+            base_low = min(base_prices)
+            sig_low = min(sig_prices)
+            cond_stop = sig_low >= base_low * 0.995
+            cond_stable = latest_price > sig_low * 1.005
 
     if cond_vol and cond_stop and cond_stable:
         signal = "放量止跌"
@@ -805,7 +825,7 @@ def _clear_bar_caches(ticker: str):
     for key in list(_snapshot_cache.keys()):
         if key[0] == ticker:
             del _snapshot_cache[key]
-    _minute_bar_presence_cache[ticker] = True
+    _cache_put(_minute_bar_presence_cache, ticker, True, MAX_PRESENCE_CACHE_ITEMS)
 
 
 def save_quote_minute_bar(

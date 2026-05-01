@@ -18,6 +18,7 @@
 - **交互式卡片**：关注列表可删除、全部股票可添加、长桥持仓自动同步
 - **信号去重**：同一标的会合并 5日与日内信号，再用状态机判断是否推送；支持 /mute 静默（自动过期）
 - **JSONL + SQLite 存储**：JSONL 保存可回放行情快照，SQLite schema v3 保存分钟聚合、量比结果、原始快照索引和信号历史
+- **运行时防护**：配置原子写入、告警锁内不调用外部 API、飞书管理命令后台执行、WebSocket 退出前补写队列
 - **中文名标识**：标的显示中文名（如 `CLF.US 克利夫兰`），量比用符号+中文双标识
 
 ### 1.2 系统架构
@@ -132,7 +133,7 @@ volume-ratio/
 │
 ├── scripts/
 │   ├── core/                # 核心模块
-│   │   ├── config.py        #   配置加载（热加载）
+│   │   ├── config.py        #   配置加载（热加载 + 原子写入）
 │   │   ├── market.py        #   市场判断 + 标的管理
 │   │   ├── display.py       #   量比符号 + 格式化显示
 │   │   └── silence.py       #   Longbridge SDK 输出静音（安全恢复 fd）
@@ -307,6 +308,8 @@ historical_ratio > 1.5 且 intraday_ratio > 1.5
 | `/mute CLF.US 2h` | 静默指定标的 |
 | `/history CLF.US` | 近 7 日量比趋势 |
 
+`/start` 和 `/stop` 会在后台线程执行服务管理脚本，避免阻塞飞书 WebSocket 事件回调。`/stop` 会先发送关停卡片，再延迟执行 `stop_all.py`，确保用户能收到操作反馈。
+
 ### 5.2 信号卡片
 
 信号触发时推送富文本卡片，包含价格、量比、LLM 分析，底部按钮支持直接操作。
@@ -397,6 +400,8 @@ python3 scripts/llm.py --test
 | `cleanup.py` | 每小时 | 清理过期数据（各市场收盘后 1 小时触发） |
 
 `longbridge_sync.py` 只有在 watchlist 实际变化时才会写入 `config.yaml` 并重启 WebSocket；如果长桥接口失败，或返回空列表但本地已有监控标的，会中止同步并保留现有配置，避免误清空 watchlist。
+
+`alert.py` 使用 `logs/alert.lock` 防止 cron 重叠扫描，但锁内只执行市场判断、量比计算、信号去重和状态更新；LLM 分析与飞书推送在锁外执行，避免外部 API 慢请求阻塞下一轮扫描。
 
 ### 7.2 一键管理
 
@@ -509,6 +514,15 @@ python3 scripts/cleanup.py --dry-run
 
 `/status` 和 `python3 scripts/cli.py --status` 会展示当前数据库/快照占用与上限，例如 `2.9MB / 1.00GB`、`513.7MB / 3.00GB`。
 
+### 8.4 运行时保护
+
+- `core.config.save_config()` 使用 `logs/config.lock` 互斥写入，先写 `config.yaml.tmp`，再通过 `os.replace()` 原子替换，避免多进程并发写导致配置截断。
+- `compute.py` 的模块级缓存有上限：快照缓存 128 项、分钟线缓存 128 项、分钟线存在性缓存 512 项；长驻机器人进程不会无限增长。
+- `read_market_snapshots()` 在快照文件 `glob + stat + open` 过程中会跳过被 cleanup 并发删除的文件。
+- `calc_intraday_ratio_detail()` 在价格窗口全为 0 时返回保守信号，不会因为空低点集合崩溃。
+- `collect_ws.py` 收到 SIGINT/SIGTERM 后会停止主循环，并在退出前尽量补写已入队行情，降低最后几条快照丢失概率。
+- `collect_ws.py` 的 `on_quote()` 会捕获 `TypeError/AttributeError` 等 SDK 字段异常，单条异常报价不会打断 WebSocket 采集进程。
+
 ---
 
 ## 九、故障排查
@@ -600,6 +614,7 @@ dependencies = [
 | v3.4 | 2026-05-01 | 重写量比算法：5日历史同期量比 + 日内滚动量比；新增 schema v2、交易日按日期过滤、休市保护、日内基准样本门槛 |
 | v3.5 | 2026-05-01 | 性能优化：新增 schema v3 `quote_minute_bars` 分钟聚合主计算表、JSONL 回填脚本、alert 扫描休市跳过；修复 Longbridge stdout fd 风险 |
 | v3.6 | 2026-05-01 | 稳定性优化：快照 3GB/数据库 1GB 容量兜底、Longbridge SDK 安全静音、同步失败保护、无变化不重启 WebSocket、状态展示容量上限 |
+| v3.7 | 2026-05-01 | 并发与运行时加固：配置原子写入、alert 锁外执行 LLM/飞书推送、飞书 `/start` `/stop` 后台执行、compute 缓存上限、WebSocket 优雅退出补写队列 |
 
 ---
 
