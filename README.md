@@ -110,6 +110,16 @@ python3 scripts/start_all.py
 python3 scripts/stop_all.py
 ```
 
+### 2.4 历史数据回填
+
+如果本地已经有历史 JSONL 快照，首次升级到 schema v3 后建议回填一次分钟聚合表：
+
+```bash
+python3 scripts/backfill_minute_bars.py
+```
+
+回填后 `compute.py` 和 `alert.py` 会优先读取 `quote_minute_bars`，不会每分钟扫描全量 JSONL。后续 WebSocket 写入新快照时会自动同步更新分钟聚合表。
+
 ---
 
 ## 三、目录结构
@@ -514,6 +524,10 @@ python3 scripts/cleanup.py --dry-run
 - 运行一次 `python3 scripts/backfill_minute_bars.py`，把现有 JSONL 回填到 `quote_minute_bars`
 - WebSocket 后续会在写入原始快照时同步更新分钟聚合表，正常运行不再需要每分钟扫描全量 JSONL
 
+**Q: REST API 或 trading_days 日志出现 Bad file descriptor**
+- 当前版本不再用 `os.dup2()` 抑制 Longbridge SDK 输出，只在 Python 层临时 redirect `sys.stdout`
+- 如果仍看到旧日志，先确认运行的是最新代码并重启 WebSocket/飞书机器人/cron 相关进程
+
 **Q: 飞书机器人不响应**
 - 检查 `config.yaml` 中 `feishu.app_id` 和 `feishu.app_secret` 是否正确
 - 确认飞书开放平台已开启机器人能力、配置权限、发布版本
@@ -573,6 +587,7 @@ dependencies = [
 | v3.2 | 2026-04-30 | US 股票量比修复、信号卡片涨跌方向、should_push 状态推送逻辑 |
 | v3.3 | 2026-05-01 | 量比数据源切换 REST API、假期检测（trading_days API）、数据库索引优化、代码审查缺陷修复（FD double-close / 竞态条件 / PID 锁 / mute 过期等 8 项） |
 | v3.4 | 2026-05-01 | 重写量比算法：5日历史同期量比 + 日内滚动量比；新增 schema v2、交易日按日期过滤、休市保护、日内基准样本门槛 |
+| v3.5 | 2026-05-01 | 性能优化：新增 schema v3 `quote_minute_bars` 分钟聚合主计算表、JSONL 回填脚本、alert 扫描休市跳过；修复 Longbridge stdout fd 风险 |
 
 ---
 

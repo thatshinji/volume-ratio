@@ -8,6 +8,7 @@ import os
 import sys
 import time
 import signal
+import fcntl
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
@@ -15,6 +16,7 @@ LOG_DIR = ROOT / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
 PID_FILE = LOG_DIR / "ws_collect.pid"
+LOCK_FILE = LOG_DIR / "ws_collect.lock"
 SCRIPT = ROOT / "scripts" / "collect_ws.py"
 VENV_PYTHON = ROOT / ".venv" / "bin" / "python"
 
@@ -27,7 +29,29 @@ def is_running(pid: int) -> bool:
         return False
 
 
+def lock_is_held() -> bool:
+    """判断采集进程实例锁是否正被持有，避免 pid 文件陈旧时重复拉起。"""
+    if not LOCK_FILE.exists():
+        return False
+    try:
+        with open(LOCK_FILE, "r+") as lock_file:
+            try:
+                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
+                return False
+            except BlockingIOError:
+                pid_text = lock_file.read().strip()
+                if pid_text:
+                    PID_FILE.write_text(pid_text)
+                return True
+    except OSError:
+        return False
+
+
 def check_and_launch():
+    if lock_is_held():
+        return
+
     pid = None
     if PID_FILE.exists():
         try:
