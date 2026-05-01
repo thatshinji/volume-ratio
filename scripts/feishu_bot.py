@@ -1141,16 +1141,16 @@ def main():
             elif h.key == HEADER_TYPE:
                 type_ = h.value
 
-        pl = frame.payload
-        if int(sum_) > 1:
-            pl = ws_client._combine(msg_id, int(sum_), int(seq), pl)
-            if pl is None:
-                return
-
-        message_type = MessageType(type_)
         resp = WsResponse(code=200)
 
         try:
+            pl = frame.payload
+            if int(sum_) > 1:
+                pl = ws_client._combine(msg_id, int(sum_), int(seq), pl)
+                if pl is None:
+                    return
+
+            message_type = MessageType(type_)
             import time
             start = int(round(time.time() * 1000))
             if message_type == MessageType.EVENT:

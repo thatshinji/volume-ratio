@@ -156,17 +156,33 @@ def cleanup_snapshot_size_limit(dry_run: bool = False):
     if not SNAPSHOT_DIR.exists():
         return
 
-    files = [f for f in SNAPSHOT_DIR.rglob("*") if f.is_file() and f.suffix in (".jsonl", ".json")]
-    total = sum(f.stat().st_size for f in files)
+    files = []
+    total = 0
+    for f in SNAPSHOT_DIR.rglob("*"):
+        if not f.is_file() or f.suffix not in (".jsonl", ".json"):
+            continue
+        try:
+            total += f.stat().st_size
+            files.append(f)
+        except OSError:
+            continue
     if total <= SNAPSHOT_MAX_BYTES:
         return
 
     removed = 0
     removed_size = 0
-    for f in sorted(files, key=lambda p: (p.stat().st_mtime, str(p))):
+    def _safe_mtime(p):
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0
+    for f in sorted(files, key=lambda p: (_safe_mtime(p), str(p))):
         if total - removed_size <= SNAPSHOT_TARGET_BYTES:
             break
-        size = f.stat().st_size
+        try:
+            size = f.stat().st_size
+        except OSError:
+            continue
         if dry_run:
             print(f"[cleanup] dry-run: 将删除快照 {f.relative_to(ROOT)} ({format_size(size)})")
         else:

@@ -180,6 +180,10 @@ def _to_record(raw: dict, market: str) -> Optional[SnapshotRecord]:
     try:
         price = float(raw.get("price", 0) or 0)
         volume = float(raw.get("volume", 0) or 0)
+        high = float(raw.get("high", 0) or 0)
+        low = float(raw.get("low", 0) or 0)
+        turnover = float(raw.get("turnover", 0) or 0)
+        change_pct = float(raw.get("change_pct", 0) or 0)
     except (TypeError, ValueError):
         return None
     if price <= 0 or volume < 0:
@@ -191,11 +195,11 @@ def _to_record(raw: dict, market: str) -> Optional[SnapshotRecord]:
         market_date=market_ts.date(),
         market_minutes=market_ts.hour * 60 + market_ts.minute,
         price=price,
-        high=float(raw.get("high", 0) or 0),
-        low=float(raw.get("low", 0) or 0),
+        high=high,
+        low=low,
         volume=volume,
-        turnover=float(raw.get("turnover", 0) or 0),
-        change_pct=float(raw.get("change_pct", 0) or 0),
+        turnover=turnover,
+        change_pct=change_pct,
     )
 
 
@@ -958,38 +962,41 @@ def save_ratio(result: dict):
         return
 
     init_db()
-    with sqlite3.connect(get_db_path(), timeout=30) as conn:
-        conn.execute("""
-            INSERT INTO volume_ratios
-            (ticker, name, timestamp, market, market_timestamp, market_date, price, change_pct,
-             historical_ratio, historical_today_volume, historical_avg_volume, historical_sample_days,
-             historical_signal, intraday_ratio, intraday_window_volume, intraday_baseline_volume,
-             intraday_baseline_samples, intraday_signal, cond_vol, cond_stop, cond_stable, data_quality)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            ticker,
-            result.get("name", ticker),
-            now.isoformat(),
-            result.get("market", ""),
-            result.get("market_time", ""),
-            result.get("market_date", ""),
-            result.get("price", 0),
-            result.get("change_pct", 0),
-            result.get("ratio", 0),
-            result.get("volume_today", 0),
-            result.get("volume_avg5", 0),
-            result.get("historical_sample_days", 0),
-            result.get("signal", ""),
-            result.get("ratio_intraday", 0),
-            result.get("intraday_window_volume", 0),
-            result.get("intraday_baseline_volume", 0),
-            result.get("intraday_baseline_samples", 0),
-            result.get("signal_intraday", ""),
-            int(bool(result.get("cond_vol", False))),
-            int(bool(result.get("cond_stop", False))),
-            int(bool(result.get("cond_stable", False))),
-            result.get("data_quality", ""),
-        ))
+    try:
+        with sqlite3.connect(get_db_path(), timeout=30) as conn:
+            conn.execute("""
+                INSERT INTO volume_ratios
+                (ticker, name, timestamp, market, market_timestamp, market_date, price, change_pct,
+                 historical_ratio, historical_today_volume, historical_avg_volume, historical_sample_days,
+                 historical_signal, intraday_ratio, intraday_window_volume, intraday_baseline_volume,
+                 intraday_baseline_samples, intraday_signal, cond_vol, cond_stop, cond_stable, data_quality)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                ticker,
+                result.get("name", ticker),
+                now.isoformat(),
+                result.get("market", ""),
+                result.get("market_time", ""),
+                result.get("market_date", ""),
+                result.get("price", 0),
+                result.get("change_pct", 0),
+                result.get("ratio", 0),
+                result.get("volume_today", 0),
+                result.get("volume_avg5", 0),
+                result.get("historical_sample_days", 0),
+                result.get("signal", ""),
+                result.get("ratio_intraday", 0),
+                result.get("intraday_window_volume", 0),
+                result.get("intraday_baseline_volume", 0),
+                result.get("intraday_baseline_samples", 0),
+                result.get("signal_intraday", ""),
+                int(bool(result.get("cond_vol", False))),
+                int(bool(result.get("cond_stop", False))),
+                int(bool(result.get("cond_stable", False))),
+                result.get("data_quality", ""),
+            ))
+    except sqlite3.Error:
+        pass
     _last_ratio_write[ticker] = now
 
 
