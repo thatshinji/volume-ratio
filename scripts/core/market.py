@@ -6,6 +6,7 @@
 from datetime import datetime, date, timedelta
 import contextlib
 import io
+from zoneinfo import ZoneInfo
 
 from .config import parse_ticker
 
@@ -15,6 +16,16 @@ _trading_days_cache = {}
 _trading_days_range_cache = {}
 # 交易日查找缓存: {market: (start, end, trading_days_set)}
 _trading_days_lookup_cache = {}
+
+MARKET_TZ = {
+    "CN": ZoneInfo("Asia/Shanghai"),
+    "HK": ZoneInfo("Asia/Hong_Kong"),
+    "US": ZoneInfo("America/New_York"),
+}
+
+
+def market_now(market: str) -> datetime:
+    return datetime.now(MARKET_TZ.get(market, MARKET_TZ["US"]))
 
 
 def _fetch_trading_days(market: str, start: date, end: date) -> set:
@@ -53,7 +64,7 @@ def _fetch_trading_days(market: str, start: date, end: date) -> set:
 
 def _check_trading_days(market: str) -> set:
     """查询交易日集合（每天只查一次）"""
-    today = date.today()
+    today = market_now(market).date()
     if market in _trading_days_cache:
         cached_date, cached_data = _trading_days_cache[market]
         if cached_date == today:
@@ -67,10 +78,11 @@ def _check_trading_days(market: str) -> set:
 
 def _is_trading_day(market: str) -> bool:
     """判断今天是否为该市场的交易日"""
+    today = market_now(market).date()
     trading_days = _check_trading_days(market)
     if not trading_days:
         return True  # 查询失败时默认交易日
-    return date.today() in trading_days
+    return today in trading_days
 
 
 def is_trading_day_on(market: str, target_date: date) -> bool:
@@ -97,7 +109,7 @@ def is_trading_day_on(market: str, target_date: date) -> bool:
 
 def is_market_trading(market: str) -> bool:
     """判断市场当前是否在交易时间内（含假期检测）"""
-    now = datetime.now()
+    now = market_now(market)
     weekday = now.weekday()  # 0=周一, 6=周日
 
     # 周末不交易
@@ -119,21 +131,9 @@ def is_market_trading(market: str) -> bool:
         return (930 <= t <= 1200) or (1300 <= t <= 1600)
 
     elif market == "US":
-        # 美股: 9:30-16:00 ET (夏令时 UTC-4, 冬令时 UTC-5)
-        # 北京时间: 夏令时 21:30-次日4:00, 冬令时 22:30-次日5:00
-        # 需要先把系统本地时间转为 UTC，再转为 ET
-        try:
-            import pytz
-            et = pytz.timezone("US/Eastern")
-            # 先获取当前 UTC 时间，再转为 ET
-            utc_now = datetime.now(pytz.UTC)
-            et_now = utc_now.astimezone(et)
-            t = et_now.hour * 100 + et_now.minute
-            return 930 <= t <= 1600
-        except ImportError:
-            # 无 pytz 时，粗略判断（北京时间 21:30-次日5:00）
-            t = now.hour * 100 + now.minute
-            return (2130 <= t <= 2359) or (0 <= t <= 500)
+        # 美股: 9:30-16:00 ET，使用市场本地日期和时间判断。
+        t = now.hour * 100 + now.minute
+        return 930 <= t <= 1600
 
     return False
 

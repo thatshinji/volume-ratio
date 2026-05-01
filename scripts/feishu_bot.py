@@ -30,7 +30,7 @@ from lark_oapi.ws.enum import MessageType
 from lark_oapi.core.json import JSON
 from lark_oapi.core.const import UTF_8
 
-from core.config import load_config, parse_ticker, remove_ticker_from_config
+from core.config import load_config, parse_ticker, remove_ticker_from_config, save_config
 from core.market import get_all_tickers_with_names, get_ticker_name, get_market
 from core.display import format_ratio_display, format_ticker_line, build_market_table, build_brief_elements
 
@@ -745,9 +745,7 @@ def handle_card_action(data) -> "P2CardActionTriggerResponse":
                 if not any(item.startswith(ticker + "-") or item == ticker for item in items):
                     items.append(entry)
                     config["watchlist"][market] = items
-                    import yaml
-                    with open(ROOT / "config.yaml", "w", encoding="utf-8") as f:
-                        yaml.dump(config, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+                    save_config(config)
             print(f"[bot] 已添加到量比监控: {ticker}-{name}", flush=True)
         else:
             print(f"[bot] 添加失败: {ticker}", flush=True)

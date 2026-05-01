@@ -31,6 +31,18 @@ def load_config() -> dict:
     return _config_cache or {}
 
 
+def save_config(config: dict):
+    """写入 config.yaml 并同步刷新本进程缓存。"""
+    global _config_cache, _config_mtime
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        yaml.dump(config, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+    try:
+        _config_mtime = CONFIG_PATH.stat().st_mtime
+    except OSError:
+        _config_mtime = 0
+    _config_cache = config
+
+
 def remove_ticker_from_config(ticker: str) -> bool:
     """从 config.yaml watchlist 中移除指定标的"""
     config = load_config()
@@ -42,8 +54,7 @@ def remove_ticker_from_config(ticker: str) -> bool:
             config["watchlist"][market] = new_items
             removed = True
     if removed:
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            yaml.dump(config, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+        save_config(config)
     return removed
 
 

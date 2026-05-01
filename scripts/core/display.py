@@ -10,7 +10,9 @@ def format_ratio_display(ratio: float) -> str:
     量比显示：符号 + 中文双标识
     阈值与 get_signal() 保持一致
     """
-    if ratio > 5.0:
+    if ratio <= 0:
+        return "数据不足"
+    elif ratio > 5.0:
         return "⬆⬆⬆ 巨量"
     elif ratio > 2.0:
         return "⬆⬆  显著放量"

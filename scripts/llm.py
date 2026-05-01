@@ -19,7 +19,7 @@ CONFIG_PATH = ROOT / "config.yaml"
 # 将 scripts/ 加入 sys.path
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from core.config import load_config
+from core.config import load_config, save_config
 
 
 def mask_key(key: str) -> str:
@@ -82,9 +82,7 @@ def switch_llm(profile_name: str) -> bool:
     }
 
     # 写回 config.yaml
-    import yaml
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        yaml.dump(config, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+    save_config(config)
 
     print(f"[llm] 已切换到: {profile_name} ({profile.get('model', '')})")
     return True

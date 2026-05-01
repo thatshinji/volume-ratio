@@ -281,7 +281,7 @@ def read_minute_bars(ticker: str, target_date: date = None) -> list[SnapshotReco
 def read_market_snapshots(ticker: str, target_date: date = None) -> list[SnapshotRecord]:
     """读取并清洗指定市场交易日的快照，优先使用 SQLite 分钟聚合。"""
     minute_records = read_minute_bars(ticker, target_date)
-    if minute_records or _ticker_has_minute_bars(ticker):
+    if minute_records:
         return minute_records
 
     market = get_market(ticker)
@@ -345,23 +345,24 @@ def get_latest_snapshot_info(ticker: str, day: datetime = None) -> Optional[dict
 
 
 def _available_market_dates(ticker: str, before: date = None) -> list[date]:
-    if _ticker_has_minute_bars(ticker):
-        params = [ticker]
-        where = "ticker = ?"
-        if before:
-            where += " AND market_date < ?"
-            params.append(before.isoformat())
-        try:
-            with sqlite3.connect(get_db_path(), timeout=30) as conn:
-                rows = conn.execute(
-                    f"SELECT DISTINCT market_date FROM quote_minute_bars WHERE {where} ORDER BY market_date",
-                    params,
-                ).fetchall()
-            return [date.fromisoformat(row[0]) for row in rows]
-        except (sqlite3.Error, ValueError):
-            pass
+    dates = set()
+    try:
+        with sqlite3.connect(get_db_path(), timeout=30) as conn:
+            minute_rows = conn.execute(
+                "SELECT DISTINCT market_date FROM quote_minute_bars WHERE ticker = ?",
+                (ticker,),
+            ).fetchall()
+            snapshot_rows = conn.execute(
+                "SELECT DISTINCT market_date FROM quote_snapshots WHERE ticker = ? AND market_date != ''",
+                (ticker,),
+            ).fetchall()
+        dates.update(date.fromisoformat(row[0]) for row in minute_rows + snapshot_rows)
+    except (sqlite3.Error, ValueError):
+        pass
 
-    dates = sorted({r.market_date for r in read_market_snapshots(ticker)})
+    if not dates and not _ticker_has_minute_bars(ticker):
+        dates = {r.market_date for r in read_market_snapshots(ticker)}
+    dates = sorted(dates)
     if before:
         dates = [d for d in dates if d < before]
     return dates
@@ -434,8 +435,19 @@ def calc_historical_ratio_detail(ticker: str, current_time: datetime = None) -> 
     target_minute = market_dt.hour * 60 + market_dt.minute
     current_date_is_trading = is_trading_day_on(market, market_date)
 
-    today_records = _records_for_date(ticker, market_date)
-    if not today_records and (not current_date_is_trading or not _is_regular_session(market, market_dt)):
+    if not _is_regular_session(market, market_dt):
+        all_records = read_market_snapshots(ticker)
+        if all_records:
+            latest = all_records[-1]
+            market_date = latest.market_date
+            market_dt = latest.market_ts
+            target_minute = latest.market_minutes
+            today_records = _records_for_date(ticker, market_date)
+        else:
+            today_records = []
+    else:
+        today_records = _records_for_date(ticker, market_date)
+    if not today_records and not current_date_is_trading:
         all_records = read_market_snapshots(ticker)
         if all_records:
             latest = all_records[-1]
@@ -516,8 +528,7 @@ def calc_intraday_ratio_detail(ticker: str, current_time: datetime = None) -> di
     if not current_date_is_trading:
         return _empty_intraday_detail("休市")
 
-    records = _records_for_date(ticker, market_date)
-    if not records and not _is_regular_session(market, market_dt):
+    if not _is_regular_session(market, market_dt):
         all_records = read_market_snapshots(ticker)
         if all_records:
             latest = all_records[-1]
@@ -525,6 +536,10 @@ def calc_intraday_ratio_detail(ticker: str, current_time: datetime = None) -> di
             market_dt = latest.market_ts
             target_minute = latest.market_minutes
             records = _records_for_date(ticker, market_date)
+        else:
+            records = []
+    else:
+        records = _records_for_date(ticker, market_date)
     if not records:
         return _empty_intraday_detail("数据不足")
 

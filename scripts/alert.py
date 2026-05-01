@@ -189,11 +189,8 @@ def detect_signals(results: List[dict]) -> List[dict]:
 
     # 保存配置（仅在移除过期 mute 时）
     if mute_dirty:
-        import yaml
-        from pathlib import Path
-        CONFIG_PATH = Path(__file__).parent.parent / "config.yaml"
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            yaml.dump(config, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+        from core.config import save_config
+        save_config(config)
 
     # 按 ticker 合并：同一 ticker 同时保留 historical 和 intraday 信息
     seen = {}

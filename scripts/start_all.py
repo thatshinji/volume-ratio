@@ -76,13 +76,17 @@ def start_websocket():
 
             print("[start] 启动 WebSocket 采集进程...")
             python_bin = str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
+            stdout = open(LOG_DIR / "ws_collect.log", "a")
+            stderr = open(LOG_DIR / "ws_collect.err", "a")
             proc = subprocess.Popen(
                 [python_bin, str(SCRIPTS_DIR / "collect_ws.py")],
                 stdin=subprocess.DEVNULL,
-                stdout=open(LOG_DIR / "ws_collect.log", "a"),
-                stderr=open(LOG_DIR / "ws_collect.err", "a"),
+                stdout=stdout,
+                stderr=stderr,
                 start_new_session=True,
             )
+            stdout.close()
+            stderr.close()
             pid_file.write_text(str(proc.pid))
             print(f"[start] WebSocket 启动，PID: {proc.pid}")
             return
@@ -128,13 +132,17 @@ def start_feishu_bot():
             print("[start] 启动飞书机器人...")
             python_bin = str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
 
+            stdout = open(LOG_DIR / "feishu_bot.log", "a")
+            stderr = open(LOG_DIR / "feishu_bot.err", "a")
             proc = subprocess.Popen(
                 [python_bin, str(SCRIPTS_DIR / "feishu_bot.py")],
                 stdin=subprocess.DEVNULL,
-                stdout=open(LOG_DIR / "feishu_bot.log", "a"),
-                stderr=open(LOG_DIR / "feishu_bot.err", "a"),
+                stdout=stdout,
+                stderr=stderr,
                 start_new_session=True,
             )
+            stdout.close()
+            stderr.close()
             pid_file.write_text(str(proc.pid))
             print(f"[start] 飞书机器人启动，PID: {proc.pid}")
             return

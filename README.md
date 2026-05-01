@@ -384,7 +384,7 @@ python3 scripts/llm.py --test
 
 ### 7.1 服务列表
 
-项目有 5 个 cron 任务，由 `start_all.py` 自动配置：
+项目有 6 个 cron 任务，由 `start_all.py` 自动配置：
 
 | 服务 | 频率 | 作用 |
 |:--|:--|:--|

@@ -11,7 +11,7 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import yaml
-from core.config import CONFIG_PATH, load_config
+from core.config import CONFIG_PATH, load_config, save_config
 from core.market import get_market
 
 
@@ -115,8 +115,7 @@ def sync_to_config(new_watchlist: dict) -> dict:
         "hk": new_watchlist.get("hk", []),
         "cn": new_watchlist.get("cn", []),
     }
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        yaml.dump(config, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+    save_config(config)
 
     return {"added": added, "removed": removed, "unchanged": unchanged}
 
@@ -192,17 +191,27 @@ def _restart_websocket():
     try:
         if pid_file.exists():
             old_pid = int(pid_file.read_text().strip())
-            os.kill(old_pid, signal.SIGKILL)
-            time.sleep(1)
+            os.kill(old_pid, signal.SIGTERM)
+            deadline = time.time() + 8
+            while time.time() < deadline:
+                try:
+                    os.kill(old_pid, 0)
+                except OSError:
+                    break
+                time.sleep(0.2)
+            else:
+                os.kill(old_pid, signal.SIGKILL)
+                time.sleep(1)
     except (ValueError, OSError):
         pass
 
     # 重启 WS 采集
-    subprocess.Popen(
-        [sys.executable, str(ROOT / "scripts" / "collect_ws.py"), "--daemon"],
-        stdout=open(os.devnull, "w"),
-        stderr=open(os.devnull, "w"),
-    )
+    with open(os.devnull, "w") as devnull:
+        subprocess.Popen(
+            [sys.executable, str(ROOT / "scripts" / "collect_ws.py"), "--daemon"],
+            stdout=devnull,
+            stderr=devnull,
+        )
     print("[sync] WebSocket 采集已重启", flush=True)
 
 

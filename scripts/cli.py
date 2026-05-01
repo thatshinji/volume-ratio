@@ -18,7 +18,7 @@ ROOT = Path(__file__).parent.parent
 # 将 scripts/ 加入 sys.path
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from core.config import load_config, parse_ticker, CONFIG_PATH
+from core.config import load_config, parse_ticker, CONFIG_PATH, save_config
 from core.market import get_all_tickers, get_all_tickers_with_names, get_ticker_name
 from core.display import format_ratio_display, format_ticker_line
 
@@ -278,8 +278,6 @@ def cmd_signals():
 
 def cmd_add_ticker(raw: str):
     """添加监控标的到 config.yaml"""
-    import yaml
-
     ticker, name = parse_ticker(raw)
     config = load_config()
 
@@ -309,16 +307,13 @@ def cmd_add_ticker(raw: str):
     watchlist[market_key] = market_list
     config["watchlist"] = watchlist
 
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        yaml.dump(config, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+    save_config(config)
 
     print(f"已添加: {ticker} {name}")
 
 
 def cmd_remove_ticker(ticker: str):
     """从 config.yaml 移除监控标的"""
-    import yaml
-
     config = load_config()
     watchlist = config.get("watchlist", {})
     removed = False
@@ -339,16 +334,13 @@ def cmd_remove_ticker(ticker: str):
         return
 
     config["watchlist"] = watchlist
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        yaml.dump(config, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+    save_config(config)
 
     print(f"已移除: {ticker}")
 
 
 def cmd_mute(ticker: str, duration: str):
     """静默指定标的"""
-    import yaml
-
     # 解析时长 (2h, 30m, etc.)
     if duration.endswith("h"):
         hours = float(duration[:-1])
@@ -364,8 +356,7 @@ def cmd_mute(ticker: str, duration: str):
     mute_list[ticker] = until.isoformat()
     config["mute"] = mute_list
 
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        yaml.dump(config, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+    save_config(config)
 
     print(f"已静默: {ticker} 至 {until.strftime('%H:%M:%S')} ({duration})")
 
