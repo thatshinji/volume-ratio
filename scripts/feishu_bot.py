@@ -22,6 +22,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
+GIB = 1024 * 1024 * 1024
+SNAPSHOT_MAX_BYTES = 3 * GIB
+DB_MAX_BYTES = 1 * GIB
 
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import *
@@ -32,7 +35,7 @@ from lark_oapi.core.const import UTF_8
 
 from core.config import load_config, parse_ticker, remove_ticker_from_config, save_config
 from core.market import get_all_tickers_with_names, get_ticker_name, get_market
-from core.display import format_ratio_display, format_ticker_line, build_market_table, build_brief_elements
+from core.display import format_ratio_display, format_ticker_line, build_market_table, build_brief_elements, format_size
 
 # 全局变量
 running = threading.Event()
@@ -49,9 +52,11 @@ def acquire_instance_lock() -> bool:
     global _instance_lock_file
     lock_path = ROOT / "logs" / "feishu_bot.lock"
     lock_path.parent.mkdir(exist_ok=True)
-    _instance_lock_file = open(lock_path, "w")
+    _instance_lock_file = open(lock_path, "a+")
     try:
         fcntl.flock(_instance_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _instance_lock_file.seek(0)
+        _instance_lock_file.truncate()
         _instance_lock_file.write(str(os.getpid()))
         _instance_lock_file.flush()
         return True
@@ -172,6 +177,7 @@ def build_status_card() -> dict:
     service_status = _check_component_status()
     schema_version = "-"
     ratio_count = signal_count = llm_count = 0
+    db_size = db_path.stat().st_size if db_path.exists() else 0
     latest_signal = None
     algo = {
         "total": len(tickers),
@@ -230,7 +236,8 @@ def build_status_card() -> dict:
     for key, label in [("ws", "WebSocket"), ("bot", "飞书机器人"), ("cron", "Cron"), ("db", "数据库")]:
         icon, detail = service_status.get(key, ("❓", "未知"))
         if key == "db":
-            detail = f"schema {schema_version}，量比 {ratio_count:,} 条"
+            db_warn = "，接近上限" if db_size >= DB_MAX_BYTES * 0.8 else ""
+            detail = f"schema {schema_version}，量比 {ratio_count:,} 条，{format_size(db_size)}/{format_size(DB_MAX_BYTES)}{db_warn}"
         lines.append(f"{icon} {label}: {detail}")
     lines.append(f"✅ LLM: {llm.get('model', '未配置')}，今日调用 {llm_count} 次")
     lines.append("")
@@ -244,7 +251,8 @@ def build_status_card() -> dict:
             lines.append(f"{label}: {trading}，最近 {snap['ticker']} {snap['time']}（{age}前）")
         else:
             lines.append(f"{label}: {trading}，无快照")
-    lines.append(f"快照占用: {snapshot_size // (1024 * 1024)}MB")
+    snapshot_warn = "，接近上限" if snapshot_size >= SNAPSHOT_MAX_BYTES * 0.8 else ""
+    lines.append(f"快照占用: {format_size(snapshot_size)} / {format_size(SNAPSHOT_MAX_BYTES)}{snapshot_warn}")
     lines.append("")
 
     lines.append("**算法**")

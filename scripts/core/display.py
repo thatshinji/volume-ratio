@@ -5,6 +5,17 @@
 from typing import List
 
 
+def format_size(size_bytes: int) -> str:
+    """Format bytes using B/KB/MB/GB units."""
+    if size_bytes < 1024:
+        return f"{size_bytes}B"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f}KB"
+    if size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f}MB"
+    return f"{size_bytes / (1024 * 1024 * 1024):.2f}GB"
+
+
 def format_ratio_display(ratio: float) -> str:
     """
     量比显示：符号 + 中文双标识

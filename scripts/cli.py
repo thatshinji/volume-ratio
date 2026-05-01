@@ -5,6 +5,7 @@
 """
 
 import argparse
+import fcntl
 import json
 import os
 import sqlite3
@@ -14,13 +15,16 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
+GIB = 1024 * 1024 * 1024
+SNAPSHOT_MAX_BYTES = 3 * GIB
+DB_MAX_BYTES = 1 * GIB
 
 # 将 scripts/ 加入 sys.path
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from core.config import load_config, parse_ticker, CONFIG_PATH, save_config
+from core.config import load_config, parse_ticker, save_config
 from core.market import get_all_tickers, get_all_tickers_with_names, get_ticker_name
-from core.display import format_ratio_display, format_ticker_line
+from core.display import format_ratio_display, format_ticker_line, format_size
 
 
 # === LLM Prompt 模板 ===
@@ -114,10 +118,32 @@ def cmd_status():
     """系统健康状态检查"""
     print("=== 系统状态 ===")
 
+    def locked_pid(lock_path: Path, pid_path: Path) -> str:
+        if not lock_path.exists():
+            return ""
+        try:
+            with open(lock_path, "r+") as lock_file:
+                try:
+                    fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(lock_file, fcntl.LOCK_UN)
+                    return ""
+                except BlockingIOError:
+                    pid_text = lock_file.read().strip()
+                    if pid_text:
+                        pid_path.write_text(pid_text)
+                    return pid_text
+        except OSError:
+            return ""
+
     # WebSocket 采集进程
     pid_file = ROOT / "logs" / "ws_collect.pid"
+    lock_pid = locked_pid(ROOT / "logs" / "ws_collect.lock", pid_file)
     ws_ok = False
-    if pid_file.exists():
+    if lock_pid:
+        ws_ok = True
+        latest_time = _get_latest_snapshot_time()
+        print(f"  WebSocket: ✅ PID {lock_pid}, 最近采集 {latest_time}")
+    elif pid_file.exists():
         try:
             pid = int(pid_file.read_text().strip())
             os.kill(pid, 0)
@@ -140,6 +166,8 @@ def cmd_status():
             print(f"  Cron 任务: ❌ 未配置")
     except subprocess.TimeoutExpired:
         print(f"  Cron 任务: ⚠️ 检查超时")
+    except OSError as e:
+        print(f"  Cron 任务: ⚠️ 无法检查 ({e})")
 
     # 飞书推送
     config = load_config()
@@ -161,7 +189,8 @@ def cmd_status():
             with sqlite3.connect(db_path, timeout=5) as conn:
                 count = conn.execute("SELECT COUNT(*) FROM volume_ratios").fetchone()[0]
                 size = db_path.stat().st_size
-                print(f"  数据库:    {count:,} 条记录 ({size // 1024}KB)")
+                warn = " ⚠️ 接近上限" if size >= DB_MAX_BYTES * 0.8 else ""
+                print(f"  数据库:    {count:,} 条记录 ({format_size(size)} / {format_size(DB_MAX_BYTES)}){warn}")
         except sqlite3.Error:
             print(f"  数据库:    ⚠️ 读取失败")
     else:
@@ -172,10 +201,10 @@ def cmd_status():
     if snapshot_dir.exists():
         total_size = sum(f.stat().st_size for f in snapshot_dir.rglob("*") if f.is_file())
         file_count = len(list(snapshot_dir.rglob("*")))
-        print(f"  快照文件:  {file_count} 个 ({total_size // (1024*1024)}MB)")
+        warn = " ⚠️ 接近上限" if total_size >= SNAPSHOT_MAX_BYTES * 0.8 else ""
+        print(f"  快照文件:  {file_count} 个 ({format_size(total_size)} / {format_size(SNAPSHOT_MAX_BYTES)}){warn}")
     else:
         print(f"  快照文件:  ❌ 目录不存在")
-
 
 def _get_latest_snapshot_time() -> str:
     """获取最近一次快照的时间"""

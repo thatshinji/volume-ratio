@@ -9,9 +9,7 @@ Usage:
 """
 
 import argparse
-import contextlib
 import fcntl
-import io
 import json
 import os
 import queue
@@ -31,6 +29,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from core.config import load_config
 from core.market import get_market, get_all_tickers
+from core.silence import suppress_stdout
 
 # 线程安全的全局变量
 running = threading.Event()
@@ -56,7 +55,7 @@ def fetch_prev_close(tickers: list):
             print("[ws] prev_close 缓存失败: token 目录为空", flush=True)
             return
         cid = files[0].name
-        with contextlib.redirect_stdout(io.StringIO()):
+        with suppress_stdout():
             oauth = OAuthBuilder(cid).build(lambda url: None)
             config = Config.from_oauth(oauth)
             ctx = QuoteContext(config)
@@ -65,31 +64,10 @@ def fetch_prev_close(tickers: list):
             for q in quotes:
                 _prev_close_cache[q.symbol] = float(q.prev_close or 0)
         print(f"[ws] prev_close 缓存完成: {len(_prev_close_cache)} 个标的", flush=True)
-    except (OSError, ValueError, KeyError) as e:
+    except BaseException as e:
+        if isinstance(e, (KeyboardInterrupt, SystemExit)):
+            raise
         print(f"[ws] prev_close 缓存失败: {e}", flush=True)
-
-
-def get_prev_close(ticker: str) -> float:
-    """从最新 JSONL 快照获取昨收价"""
-    jsonl_path = get_jsonl_path(ticker)
-    if not jsonl_path.exists():
-        return 0.0
-
-    last_price = 0.0
-    try:
-        with open(jsonl_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                    last_price = float(data.get("price", 0))
-                except (json.JSONDecodeError, ValueError):
-                    continue
-    except OSError:
-        pass
-    return last_price
 
 
 def extract_fields(quote, ticker: str) -> dict:
@@ -176,9 +154,11 @@ def acquire_instance_lock() -> bool:
     global _instance_lock_file
     lock_path = ROOT / "logs" / "ws_collect.lock"
     lock_path.parent.mkdir(exist_ok=True)
-    _instance_lock_file = open(lock_path, "w")
+    _instance_lock_file = open(lock_path, "a+")
     try:
         fcntl.flock(_instance_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _instance_lock_file.seek(0)
+        _instance_lock_file.truncate()
         _instance_lock_file.write(str(os.getpid()))
         _instance_lock_file.flush()
         return True
@@ -206,9 +186,10 @@ def run_websocket():
     for attempt in range(max_retries):
         try:
             client_id = get_client_id()
-            oauth = OAuthBuilder(client_id).build(lambda url: None)
-            config = Config.from_oauth(oauth)
-            ctx = QuoteContext(config)
+            with suppress_stdout():
+                oauth = OAuthBuilder(client_id).build(lambda url: None)
+                config = Config.from_oauth(oauth)
+                ctx = QuoteContext(config)
 
             config_data = load_config()
             tickers = get_all_tickers(config_data)
@@ -218,7 +199,8 @@ def run_websocket():
             fetch_prev_close(tickers)
 
             ctx.set_on_quote(on_quote)
-            ctx.subscribe(tickers, [SubType.Quote])
+            with suppress_stdout():
+                ctx.subscribe(tickers, [SubType.Quote])
             print(f"[ws] 订阅成功，等待行情推送...", flush=True)
 
             # 连接成功，重置重试计数
@@ -262,6 +244,13 @@ def run_websocket():
 
         except Exception as e:
             print(f"[ws] 未知异常: {e}", flush=True)
+            traceback.print_exc()
+            return
+
+        except BaseException as e:
+            if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                raise
+            print(f"[ws] Longbridge SDK 异常: {e}", flush=True)
             traceback.print_exc()
             return
 

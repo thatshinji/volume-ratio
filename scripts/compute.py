@@ -10,8 +10,6 @@ import json
 import os
 import sqlite3
 import sys
-import contextlib
-import io
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -29,6 +27,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from core.config import load_config
 from core.market import get_market, get_all_tickers, get_ticker_name, is_market_trading
 from core.market import _is_trading_day as is_trading_day, is_trading_day_on
+from core.silence import suppress_stdout
 
 MARKET_TZ = {
     "CN": ZoneInfo("Asia/Shanghai"),
@@ -1017,7 +1016,7 @@ def _fetch_price_from_api(tickers: list) -> dict:
         if not files:
             return {}
         cid = files[0].name
-        with contextlib.redirect_stdout(io.StringIO()):
+        with suppress_stdout():
             oauth = OAuthBuilder(cid).build(lambda url: None)
             config = Config.from_oauth(oauth)
             ctx = QuoteContext(config)
@@ -1029,7 +1028,9 @@ def _fetch_price_from_api(tickers: list) -> dict:
             change_pct = round((last - prev) / prev * 100, 2) if prev > 0 else None
             result[q.symbol] = {"price": last, "change_pct": change_pct, "volume": int(q.volume or 0)}
         return result
-    except Exception as e:
+    except BaseException as e:
+        if isinstance(e, (KeyboardInterrupt, SystemExit)):
+            raise
         print(f"[compute] API 价格获取失败: {e}", flush=True)
         return {}
 

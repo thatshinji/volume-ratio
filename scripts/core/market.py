@@ -4,11 +4,10 @@
 """
 
 from datetime import datetime, date, timedelta
-import contextlib
-import io
 from zoneinfo import ZoneInfo
 
 from .config import parse_ticker
+from .silence import suppress_stdout
 
 # 交易日缓存: {market: (date_fetched, trading_days_set)}
 _trading_days_cache = {}
@@ -42,7 +41,7 @@ def _fetch_trading_days(market: str, start: date, end: date) -> set:
             return set()
         cid = files[0]
 
-        with contextlib.redirect_stdout(io.StringIO()):
+        with suppress_stdout():
             oauth = OAuthBuilder(cid).build(lambda url: None)
             config = Config.from_oauth(oauth)
             ctx = QuoteContext(config)
@@ -58,7 +57,9 @@ def _fetch_trading_days(market: str, start: date, end: date) -> set:
             days = set(raw_days or [])
         _trading_days_range_cache[cache_key] = days
         return days
-    except Exception:
+    except BaseException as e:
+        if isinstance(e, (KeyboardInterrupt, SystemExit)):
+            raise
         return set()
 
 

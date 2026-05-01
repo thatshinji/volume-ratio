@@ -10,9 +10,9 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import yaml
-from core.config import CONFIG_PATH, load_config, save_config
+from core.config import load_config, save_config
 from core.market import get_market
+from core.silence import suppress_stdout
 
 
 def _get_longbridge_context():
@@ -24,9 +24,10 @@ def _get_longbridge_context():
     if not files:
         raise OSError("长桥 token 目录为空，请先登录长桥")
     cid = files[0].name
-    oauth = OAuthBuilder(cid).build(lambda url: None)
-    config = Config.from_oauth(oauth)
-    return QuoteContext(config), TradeContext(config)
+    with suppress_stdout():
+        oauth = OAuthBuilder(cid).build(lambda url: None)
+        config = Config.from_oauth(oauth)
+        return QuoteContext(config), TradeContext(config)
 
 
 def fetch_positions(trade_ctx) -> list:
@@ -44,6 +45,7 @@ def fetch_positions(trade_ctx) -> list:
                 result.append((symbol, name))
     except Exception as e:
         print(f"[sync] 获取持仓失败: {e}")
+        return None
     return result
 
 
@@ -58,6 +60,7 @@ def fetch_watchlist_group(quote_ctx, group_name: str) -> list:
                 break
     except Exception as e:
         print(f"[sync] 获取自选股分组失败: {e}")
+        return None
     return result
 
 
@@ -89,10 +92,20 @@ def merge_tickers(positions: list, watchlist: list) -> dict:
 def sync_to_config(new_watchlist: dict) -> dict:
     """
     将新的 watchlist 写入 config.yaml
-    返回: {"added": [...], "removed": [...], "unchanged": [...]}
+    返回: {"added": [...], "removed": [...], "unchanged": [...], "changed": bool}
     """
     config = load_config()
     old_watchlist = config.get("watchlist", {})
+    normalized_new = {
+        "us": new_watchlist.get("us", []),
+        "hk": new_watchlist.get("hk", []),
+        "cn": new_watchlist.get("cn", []),
+    }
+    normalized_old = {
+        "us": old_watchlist.get("us", []),
+        "hk": old_watchlist.get("hk", []),
+        "cn": old_watchlist.get("cn", []),
+    }
 
     # 收集旧的和新的 ticker 集合
     old_tickers = set()
@@ -109,15 +122,12 @@ def sync_to_config(new_watchlist: dict) -> dict:
     removed = sorted(old_tickers - new_tickers)
     unchanged = sorted(old_tickers & new_tickers)
 
-    # 写入 config.yaml
-    config["watchlist"] = {
-        "us": new_watchlist.get("us", []),
-        "hk": new_watchlist.get("hk", []),
-        "cn": new_watchlist.get("cn", []),
-    }
-    save_config(config)
+    changed = normalized_old != normalized_new
+    if changed:
+        config["watchlist"] = normalized_new
+        save_config(config)
 
-    return {"added": added, "removed": removed, "unchanged": unchanged}
+    return {"added": added, "removed": removed, "unchanged": unchanged, "changed": changed}
 
 
 def remove_from_watchlist(ticker: str, group_name: str = "量比监控") -> bool:
@@ -225,29 +235,53 @@ def run_sync(groups: list = None, restart_ws: bool = True) -> dict:
     if groups is None:
         groups = ["量比监控"]
 
-    quote_ctx, trade_ctx = _get_longbridge_context()
+    try:
+        quote_ctx, trade_ctx = _get_longbridge_context()
+    except BaseException as e:
+        if isinstance(e, (KeyboardInterrupt, SystemExit)):
+            raise
+        print(f"[sync] 长桥上下文初始化失败: {e}", flush=True)
+        return {"added": [], "removed": [], "positions": [], "watchlist": [], "final": load_config().get("watchlist", {})}
 
     # 1. 获取持仓
     positions = fetch_positions(trade_ctx)
+    if positions is None:
+        print("[sync] 同步中止：持仓接口失败，保留现有 config.yaml", flush=True)
+        return {"added": [], "removed": [], "positions": [], "watchlist": [], "final": load_config().get("watchlist", {})}
     print(f"[sync] 持仓: {[t[0] for t in positions]}")
 
     # 2. 获取自选股分组
     watchlist = []
     for group_name in groups:
         group_tickers = fetch_watchlist_group(quote_ctx, group_name)
+        if group_tickers is None:
+            print(f"[sync] 同步中止：分组「{group_name}」接口失败，保留现有 config.yaml", flush=True)
+            return {"added": [], "removed": [], "positions": [t[0] for t in positions], "watchlist": [], "final": load_config().get("watchlist", {})}
         print(f"[sync] 分组「{group_name}」: {[t[0] for t in group_tickers]}")
         watchlist.extend(group_tickers)
 
     # 3. 合并
     new_watchlist = merge_tickers(positions, watchlist)
+    new_total = sum(len(v) for v in new_watchlist.values())
+    old_watchlist = load_config().get("watchlist", {})
+    old_total = sum(len(old_watchlist.get(market, [])) for market in ["us", "hk", "cn"])
+    if old_total > 0 and new_total == 0:
+        print("[sync] 同步中止：长桥返回空列表，为避免误清空监控标的，保留现有 config.yaml", flush=True)
+        return {
+            "added": [],
+            "removed": [],
+            "positions": [t[0] for t in positions],
+            "watchlist": [t[0] for t in watchlist],
+            "final": old_watchlist,
+        }
 
     # 4. 写入 config
     changes = sync_to_config(new_watchlist)
 
-    total = sum(len(v) for v in new_watchlist.values())
-    print(f"[sync] 完成: {total} 个标的, 新增 {len(changes['added'])}, 移除 {len(changes['removed'])}")
+    changed_label = "配置已更新" if changes["changed"] else "配置无变化"
+    print(f"[sync] 完成: {new_total} 个标的, 新增 {len(changes['added'])}, 移除 {len(changes['removed'])}，{changed_label}")
 
-    if restart_ws:
+    if restart_ws and changes["changed"]:
         _restart_websocket()
 
     return {

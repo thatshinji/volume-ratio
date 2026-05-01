@@ -490,6 +490,11 @@ DROP TABLE IF EXISTS signal_states
 - quote_minute_bars：20 天
 - volume_ratios：20 天
 - signals：20 天
+- llm_calls：90 天
+
+同时有容量兜底：
+- `data/snapshots` 超过 3GB 时，自动删除最旧 `.jsonl/.json` 快照，直到降到 2.7GB 以下
+- `data/ratios.db` 超过 1GB 时，先清理过期记录并执行 `VACUUM`；如果仍超限，再按重要性从低到高裁剪最旧记录
 
 ```bash
 # 查看清理状态

@@ -14,7 +14,6 @@ from typing import Optional
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
-CONFIG_PATH = ROOT / "config.yaml"
 
 # 将 scripts/ 加入 sys.path
 sys.path.insert(0, str(ROOT / "scripts"))
