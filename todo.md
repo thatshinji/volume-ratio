@@ -1,9 +1,47 @@
 # 跨市场量比监控系统 - TODO
 
 > 创建时间：2026-04-29
-> 状态：进行中
+> 最后更新：2026-05-01
 
 ---
+
+## 代码审查剩余问题（2026-05-01）
+
+33 个问题已修复 8 个高优先级，剩余 25 个。修复记录见 `docs/changelog-2026-05-01-fixes.md`。
+
+### MEDIUM（14 个）
+
+- [ ] **config.yaml 硬编码密钥**：api_key、app_secret 明文存储，应改用环境变量或加密存储
+- [ ] **日志轮转缺失**：ws_collect.log / feishu_bot.log 等无大小限制，长期运行可能撑满磁盘
+- [ ] **collect_ws.py 错误处理过于宽泛**：多个 `except Exception` 应细化为具体异常类型
+- [ ] **compute.py K-line API 失败无重试**：`_fetch_historical_volumes` 单次失败直接返回空，应加重试
+- [ ] **feishu_bot.py 长连接无心跳检测**：WebSocket 连接可能静默断开
+- [ ] **alert.py LLM 调用超时无降级**：LLM 分析失败时整个信号推送阻塞
+- [ ] **cli.py 无输入验证**：`--add` / `--remove` 不校验 ticker 格式
+- [ ] **compute.py 除零风险**：`ratio = today_vol / avg_vol` 未保护 avg_vol=0 的情况
+- [ ] **feishu_bot.py /sync 无并发保护**：多次快速触发 /sync 可能重复写入 config.yaml
+- [ ] **cleanup.py 数据库清理无事务**：DELETE 操作未使用事务包裹
+- [ ] **longbridge_sync.py API 失败无回退**：同步失败时 watchlist 可能被清空
+- [ ] **market.py _check_trading_days 失败时默认交易日**：查询失败返回 True，假期可能误推送
+- [ ] **compute.py _kline_daily_cache 无大小限制**：多标的长期运行缓存可能过大
+- [ ] **collect_ws.py prev_close 缓存清理时机不佳**：在行情高峰时清理可能影响性能
+
+### LOW（10 个）
+
+- [ ] **代码风格**：部分函数缺少类型注解（如 `get_all_tickers` 返回值）
+- [ ] **命名不一致**：`is_market_trading` vs `is_trading_day` vs `_is_trading_day` 命名混乱
+- [ ] **collect.py 废弃未删除**：已被 collect_ws.py 替代，应清理
+- [ ] **display.py 硬编码阈值**：量比显示阈值（5.0/2.0/1.5/0.8/0.5）应可配置
+- [ ] **缺少单元测试**：核心计算逻辑无测试覆盖
+- [ ] **config.py 热加载无防抖**：高频读取 config.yaml 可能产生 IO 压力
+- [ ] **feishu_bot.py 卡片模板硬编码**：飞书卡片结构应抽为模板
+- [ ] **缺少 .gitignore**：config.yaml、data/、logs/ 应被忽略
+- [ ] **pyproject.toml 缺少 scripts 入口**：应配置 console_scripts 便于安装
+- [ ] **longbridge_sync.py 同步结果无持久化**：每次同步都重新查询 API
+
+---
+
+## 功能 TODO
 
 ## TODO 1：优化放量突破策略
 

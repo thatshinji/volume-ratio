@@ -11,10 +11,12 @@
 - **双量比引擎**：同时运行日内滚动量比（立即生效）和5日历史量比（需要数据积累）
 - **多市场覆盖**：美股(US)、港股(HK)、A股(CN) 三大市场
 - **智能信号检测**：放量突破、放量下跌、缩量止跌、尾盘放量等
+- **假期自动检测**：通过 Longbridge trading_days API 判断交易日，假期/周末不推送
+- **REST API 数据源**：量比计算使用 Longbridge REST API（K-line 历史数据 + 实时行情），数据准确可靠
 - **LLM 多模型切换**：一键切换 MiniMax / Xiaomi 等模型，自动分析量比异常原因
-- **飞书机器人**：WebSocket 长连接，支持交互指令（/status /scan /signals /brief /watchlist /allstock /sync /start /stop）
+- **飞书机器人**：WebSocket 长连接，支持交互指令（/status /scan /signals /brief /watchlist /allstock /sync /start /stop /mute /history）
 - **交互式卡片**：关注列表可删除、全部股票可添加、长桥持仓自动同步
-- **信号去重**：状态机模型，状态变化时推送，状态持续时静默，状态升级时再推送
+- **信号去重**：状态机模型，状态变化时推送，状态持续时静默，状态升级时再推送；支持 /mute 静默（自动过期）
 - **JSONL 存储**：每日每标的一个 JSONL 文件，6万+文件/天 → 11文件/天
 - **中文名标识**：标的显示中文名（如 `CLF.US 克利夫兰`），量比用符号+中文双标识
 
@@ -279,9 +281,10 @@ python3 scripts/llm.py --test
 |:--|:--|:--|
 | `collect_ws_launcher.py` | 每分钟（工作日） | 检查并确保 WebSocket 采集进程存活 |
 | `feishu_bot_launcher.py` | 每分钟 | 检查并确保飞书机器人进程存活 |
-| `alert.py` | 每分钟（工作日） | 扫描量比信号，触发时推送飞书 |
+| `alert.py` | 每分钟（工作日） | 扫描量比信号，触发时推送飞书（假期自动跳过） |
 | `alert.py --brief` | 每30分钟（工作日） | 发送持仓组合量比简报 |
-| `cleanup.py` | 每小时 | 清理过期数据（JSONL/DB/信号） |
+| `longbridge_sync.py` | 每30分钟（工作日） | 同步长桥持仓+自选股 |
+| `cleanup.py` | 每小时 | 清理过期数据（各市场收盘后 1 小时触发） |
 
 ### 7.2 一键管理
 
@@ -327,19 +330,17 @@ data/snapshots/US/CLF_US_20260429.jsonl   # 一行一条快照
 
 `data/ratios.db` 包含以下表：
 
-- `volume_ratios` — 量比实时记录
-- `daily_summary` — 每日汇总
-- `signals` — 信号记录
+- `volume_ratios` — 量比实时记录（带 ticker + timestamp 索引）
+- `signals` — 信号记录（带 timestamp 索引）
 - `signal_states` — 信号去重状态
-- `llm_calls` — LLM API 调用记录（v3.1 新增）
+- `llm_calls` — LLM API 调用记录
 
 ### 8.3 数据清理
 
-`cleanup.py` 自动清理过期数据：
+`cleanup.py` 自动清理过期数据（各市场收盘后 1 小时触发）：
 - JSONL 快照：20 天
 - volume_ratios：20 天
 - signals：20 天
-- daily_summary：90 天
 
 ```bash
 # 查看清理状态
@@ -416,6 +417,8 @@ dependencies = [
 | v2.0 | 2026-04-29 | 切换 WebSocket 推送模式，新增日内滚动量比，LLM 多模型切换 |
 | v3.0 | 2026-04-29 | 迭代v1：JSONL 存储、飞书机器人交互、信号去重、中文名标识、CLI 增强、数据清理 |
 | v3.1 | 2026-04-29 | 迭代v2：/watchlist 交互删除、/allstock 二级导航、长桥持仓同步、卡片回调、WebSocket 重试、daemon 修复 |
+| v3.2 | 2026-04-30 | US 股票量比修复、信号卡片涨跌方向、should_push 状态推送逻辑 |
+| v3.3 | 2026-05-01 | 量比数据源切换 REST API、假期检测（trading_days API）、数据库索引优化、代码审查缺陷修复（FD double-close / 竞态条件 / PID 锁 / mute 过期等 8 项） |
 
 ---
 
