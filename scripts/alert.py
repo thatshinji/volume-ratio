@@ -678,7 +678,7 @@ def scan_and_alert():
 
 
 def _fetch_trend_data(tickers: list) -> dict:
-    """查询 30 分钟前的量比记录，返回 {ticker: historical_ratio} 映射。"""
+    """查询 30 分钟前的量比记录，返回 {ticker: (historical_ratio, intraday_ratio)} 映射。"""
     import sqlite3 as _sqlite3
     from datetime import timedelta
 
@@ -692,33 +692,35 @@ def _fetch_trend_data(tickers: list) -> dict:
     try:
         with _sqlite3.connect(DB_PATH, timeout=5) as conn:
             rows = conn.execute("""
-                SELECT ticker, historical_ratio
+                SELECT ticker, historical_ratio, intraday_ratio
                 FROM volume_ratios
                 WHERE timestamp BETWEEN ? AND ?
             """, (t_lo, t_hi)).fetchall()
-            for ticker, ratio in rows:
-                if ticker in ticker_set and ratio and ratio > 0:
-                    result[ticker] = ratio
+            for ticker, hist, intra in rows:
+                if ticker in ticker_set:
+                    result[ticker] = (hist or 0, intra or 0)
     except _sqlite3.Error:
         pass
     return result
 
 
+def _trend_arrow(current: float, old: float) -> str:
+    """对比当前值与旧值，返回趋势箭头。"""
+    if old > 0 and current > 0:
+        if current > old * 1.1:
+            return "↑"
+        elif current < old * 0.9:
+            return "↓"
+    return "→"
+
+
 def _annotate_trend(sorted_results: list, trend_data: dict):
-    """为 sorted_results 中每个 dict 添加 _trend 字段。"""
+    """为 sorted_results 中每个 dict 添加 _trend（5日）和 _trend_intraday（日内）字段。"""
     for r in sorted_results:
         ticker = r.get("ticker", "")
-        current = r.get("ratio", 0)
-        old = trend_data.get(ticker)
-        if old and old > 0 and current > 0:
-            if current > old * 1.1:
-                r["_trend"] = "↑"
-            elif current < old * 0.9:
-                r["_trend"] = "↓"
-            else:
-                r["_trend"] = "→"
-        else:
-            r["_trend"] = "→"
+        old_hist, old_intra = trend_data.get(ticker, (0, 0))
+        r["_trend"] = _trend_arrow(r.get("ratio", 0), old_hist)
+        r["_trend_intraday"] = _trend_arrow(r.get("ratio_intraday", 0), old_intra)
 
 
 def send_brief_report():
@@ -770,11 +772,12 @@ def send_brief_report():
         ticker = r.get("ticker", "?")
         symbol = get_currency_symbol(ticker)
         trend = r.get("_trend", "→")
+        trend_intra = r.get("_trend_intraday", "→")
         brief_lines.append(
             f"{ticker}-{name} 价格{symbol}{r.get('price',0)} "
             f"涨跌{r.get('change_pct',0):.1f}% "
             f"5日量比{r.get('ratio',0):.2f}{trend} "
-            f"日内量比{r.get('ratio_intraday',0):.2f}"
+            f"日内量比{r.get('ratio_intraday',0):.2f}{trend_intra}"
         )
     brief_text = "\n".join(brief_lines)
 
