@@ -30,7 +30,7 @@ from core.display import format_size
 # 保留天数
 SNAPSHOT_KEEP_DAYS = 20
 RATIO_KEEP_DAYS = 20
-SIGNAL_KEEP_DAYS = 20
+SIGNAL_KEEP_DAYS = 90
 LLM_KEEP_DAYS = 90
 
 GIB = 1024 * 1024 * 1024

@@ -70,10 +70,13 @@ PROMPT_BRIEF_TEMPLATE = """你是量比分析专家。以下是当前持仓组�
 
 {brief_text}
 
+近期信号表现参考：
+{signal_stats_text}
+
 请用中文简短分析：
 1. 当前市场整体情绪（哪些标的值得关注）
 2. 是否有异常信号需要关注
-3. 整体风险提示
+3. 结合历史信号表现给出风险提示
 限制150字以内。"""
 
 
@@ -523,6 +526,26 @@ def _build_batch_card(alerts_with_analysis: list) -> dict:
             continue
         elements.extend(build_market_table(label, tickers))
 
+    # 历史胜率
+    from compute import get_signal_stats
+    seen_signal_types = set()
+    for alert, _ in alerts_with_analysis:
+        sig = alert.get("signal", "")
+        if sig:
+            seen_signal_types.add(sig)
+    stats_lines = []
+    for sig in seen_signal_types:
+        st = get_signal_stats(signal_type=sig)
+        if st["total"] > 0:
+            stats_lines.append(
+                f"  {sig}: {st['win_rate_3d']}% 胜率 ({st['win_3d']}/{st['total']})，"
+                f"平均{st['avg_return_3d']:+.1f}% (3日)"
+            )
+    if stats_lines:
+        elements.append({"tag": "hr"})
+        elements.append({"tag": "div", "text": {"tag": "lark_md",
+            "content": "**📊 历史胜率（近30天）**\n" + "\n".join(stats_lines)}})
+
     # LLM 分析汇总
     analysis_lines = []
     for alert, analysis in alerts_with_analysis:
@@ -656,6 +679,7 @@ def scan_and_alert():
             ratio=ratio, price=alert.get("price", 0),
             change_pct=alert.get("change_pct", 0), source=source,
             llm_analysis=analysis or "", notified=1,
+            market=get_market(ticker),
         )
 
         change = float(alert.get("change_pct") or 0)
@@ -781,14 +805,31 @@ def send_brief_report():
         )
     brief_text = "\n".join(brief_lines)
 
+    # 信号统计
+    from compute import get_signal_stats
+    stats_parts = []
+    for sig_type in ("放量突破", "放量下跌", "缩量止跌", "尾盘放量"):
+        st = get_signal_stats(signal_type=sig_type)
+        if st["total"] > 0:
+            stats_parts.append(
+                f"{sig_type}: {st['win_rate_3d']}% 胜率 ({st['win_3d']}/{st['total']})，"
+                f"平均{st['avg_return_3d']:+.1f}% (3日)"
+            )
+    signal_stats_text = "\n".join(stats_parts) if stats_parts else "暂无历史数据"
+
     # 调用 LLM 整体解读
     analysis = None
-    prompt = PROMPT_BRIEF_TEMPLATE.format(brief_text=brief_text)
+    prompt = PROMPT_BRIEF_TEMPLATE.format(brief_text=brief_text, signal_stats_text=signal_stats_text)
     analysis = get_llm_analysis(prompt)
 
     if analysis:
         elements.append({"tag": "hr"})
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**LLM解读:** {analysis}"}})
+
+    # 信号统计摘要
+    if stats_parts:
+        elements.append({"tag": "div", "text": {"tag": "lark_md",
+            "content": "**📊 信号统计（近30天）**\n" + "\n".join(stats_parts)}})
 
     # 构建卡片（#1 标题区分）
     now = datetime.now().strftime('%H:%M')

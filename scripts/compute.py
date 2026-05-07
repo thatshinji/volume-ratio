@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 ROOT = Path(__file__).parent.parent
 SNAPSHOT_DIR = ROOT / "data" / "snapshots"
 DB_PATH = ROOT / "data" / "ratios.db"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 sys.path.insert(0, str(ROOT / "scripts"))
 
@@ -670,7 +670,7 @@ def init_db():
     db_path = get_db_path()
     with sqlite3.connect(db_path, timeout=30) as conn:
         current_version = _get_schema_version(conn)
-        if current_version not in (2, SCHEMA_VERSION):
+        if current_version not in (2, 3, SCHEMA_VERSION):
             conn.execute("DROP TABLE IF EXISTS volume_ratios")
             conn.execute("DROP TABLE IF EXISTS quote_snapshots")
             conn.execute("DROP TABLE IF EXISTS quote_minute_bars")
@@ -694,6 +694,21 @@ def init_db():
                 INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)
                 ON CONFLICT(key) DO UPDATE SET value = excluded.value
                 """,
+                (str(SCHEMA_VERSION),),
+            )
+        elif current_version == 3:
+            # v3 → v4: signals 表新增 market + 胜率回填字段
+            for col, col_type in [("market", "TEXT"), ("exit_price_1d", "REAL"),
+                                     ("exit_price_3d", "REAL"), ("exit_price_5d", "REAL"),
+                                     ("return_1d", "REAL"), ("return_3d", "REAL"),
+                                     ("return_5d", "REAL")]:
+                default = " DEFAULT ''" if col == "market" else ""
+                try:
+                    conn.execute(f"ALTER TABLE signals ADD COLUMN {col} {col_type}{default}")
+                except sqlite3.OperationalError:
+                    pass  # 列已存在
+            conn.execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
                 (str(SCHEMA_VERSION),),
             )
 
@@ -778,7 +793,14 @@ def init_db():
                 change_pct REAL,
                 source TEXT,
                 llm_analysis TEXT,
-                notified INTEGER DEFAULT 1
+                notified INTEGER DEFAULT 1,
+                market TEXT DEFAULT '',
+                exit_price_1d REAL,
+                exit_price_3d REAL,
+                exit_price_5d REAL,
+                return_1d REAL,
+                return_3d REAL,
+                return_5d REAL
             )
         """)
         conn.execute("""
@@ -1008,18 +1030,59 @@ def save_ratio(result: dict):
 
 def save_signal(ticker: str, name: str, signal_type: str, ratio: float,
                 price: float, change_pct: float, source: str = "",
-                llm_analysis: str = "", notified: int = 1):
+                llm_analysis: str = "", notified: int = 1, market: str = ""):
     init_db()
     now = datetime.now().isoformat()
     try:
         with sqlite3.connect(get_db_path(), timeout=30) as conn:
             conn.execute("""
                 INSERT INTO signals
-                (ticker, name, timestamp, signal_type, ratio, price, change_pct, source, llm_analysis, notified)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (ticker, name, now, signal_type, ratio, price, change_pct, source, llm_analysis, notified))
+                (ticker, name, timestamp, signal_type, ratio, price, change_pct, source, llm_analysis, notified, market)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (ticker, name, now, signal_type, ratio, price, change_pct, source, llm_analysis, notified, market))
     except sqlite3.Error as e:
         print(f"[compute] save_signal 失败 {ticker}: {e}", flush=True)
+
+
+def get_signal_stats(signal_type: str = "", ticker: str = "", days: int = 30) -> dict:
+    """查询指定条件的信号胜率统计。"""
+    init_db()
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    try:
+        with sqlite3.connect(get_db_path(), timeout=10) as conn:
+            row = conn.execute("""
+                SELECT
+                    COUNT(*) as total,
+                    SUM(CASE WHEN return_1d > 0 THEN 1 ELSE 0 END),
+                    AVG(return_1d),
+                    SUM(CASE WHEN return_3d > 0 THEN 1 ELSE 0 END),
+                    AVG(return_3d),
+                    SUM(CASE WHEN return_5d > 0 THEN 1 ELSE 0 END),
+                    AVG(return_5d)
+                FROM signals
+                WHERE return_5d IS NOT NULL
+                  AND timestamp >= ?
+                  AND (signal_type = ? OR ? = '')
+                  AND (ticker = ? OR ? = '')
+            """, (cutoff, signal_type, signal_type, ticker, ticker)).fetchone()
+            if not row or row[0] == 0:
+                return {"total": 0}
+            total = row[0]
+            return {
+                "total": total,
+                "win_1d": row[1] or 0,
+                "win_rate_1d": round((row[1] or 0) / total * 100, 1),
+                "avg_return_1d": round(row[2] or 0, 2),
+                "win_3d": row[3] or 0,
+                "win_rate_3d": round((row[3] or 0) / total * 100, 1),
+                "avg_return_3d": round(row[4] or 0, 2),
+                "win_5d": row[5] or 0,
+                "win_rate_5d": round((row[5] or 0) / total * 100, 1),
+                "avg_return_5d": round(row[6] or 0, 2),
+            }
+    except sqlite3.Error as e:
+        print(f"[compute] get_signal_stats 失败: {e}", flush=True)
+        return {"total": 0}
 
 
 def get_latest_snapshot(ticker: str) -> Optional[dict]:

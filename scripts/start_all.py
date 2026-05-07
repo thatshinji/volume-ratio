@@ -75,6 +75,8 @@ def main():
     add_cron(f"*/30 * * * 1-5 {python_bin} {alert_script} --brief >> {LOG_DIR}/brief.log 2>&1")
     add_cron(f"*/30 * * * 1-5 {python_bin} {sync_script} >> {LOG_DIR}/sync.log 2>&1")
     add_cron(f"0 * * * * {python_bin} {cleanup_script} >> {LOG_DIR}/cleanup.log 2>&1")
+    backfill_script = SCRIPTS_DIR / "backfill_signals.py"
+    add_cron(f"0 17 * * 1-5 {python_bin} {backfill_script} >> {LOG_DIR}/backfill.log 2>&1")
     print()
 
     # 2. 启动 WebSocket 采集进程

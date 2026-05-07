@@ -463,6 +463,21 @@ def build_signals_card() -> dict:
         "rows": table_rows,
     })
 
+    # 信号统计摘要
+    from compute import get_signal_stats
+    stats_parts = []
+    for sig_type in ("放量突破", "放量下跌", "缩量止跌", "尾盘放量"):
+        st = get_signal_stats(signal_type=sig_type)
+        if st["total"] > 0:
+            stats_parts.append(
+                f"{sig_type}: {st['win_rate_3d']}% 胜率 ({st['win_3d']}/{st['total']})，"
+                f"平均{st['avg_return_3d']:+.1f}% (3日)"
+            )
+    if stats_parts:
+        elements.append({"tag": "hr"})
+        elements.append({"tag": "div", "text": {"tag": "lark_md",
+            "content": "**📊 信号统计（近30天）**\n" + "\n".join(stats_parts)}})
+
     return {
         "config": {"wide_screen_mode": True},
         "header": {"title": {"tag": "plain_text", "content": "📈 今日信号"}},
