@@ -237,17 +237,19 @@ def build_status_card() -> dict:
 
     lines = [f"**检查时间:** {now.strftime('%Y-%m-%d %H:%M:%S')}", ""]
 
-    lines.append("**服务**")
-    for key, label in [("ws", "WebSocket"), ("bot", "飞书机器人"), ("cron", "Cron"), ("db", "数据库")]:
-        icon, detail = service_status.get(key, ("❓", "未知"))
-        if key == "db":
-            db_warn = "，接近上限" if db_size >= DB_MAX_BYTES * 0.8 else ""
-            detail = f"schema {schema_version}，量比 {ratio_count:,} 条，{format_size(db_size)}/{format_size(DB_MAX_BYTES)}{db_warn}"
-        lines.append(f"{icon} {label}: {detail}")
-    lines.append(f"✅ LLM: {llm.get('model', '未配置')}，今日调用 {llm_count} 次")
+    # 用户视角：概览、市场、算法
+    lines.append("**概览**")
+    lines.append(f"监控标的: {algo['total']} 个，今日信号: {signal_count} 个")
+    if latest_signal:
+        ticker, sig_type, source, ts = latest_signal
+        src_label = "日内+5日" if source == "mixed" else ("日内" if source == "intraday" else "5日")
+        sig_time = datetime.fromisoformat(ts).strftime("%H:%M:%S")
+        lines.append(f"最新信号: {ticker} {sig_type} [{src_label}] {sig_time}")
+    else:
+        lines.append("最新信号: 无")
     lines.append("")
 
-    lines.append("**市场 / 数据新鲜度**")
+    lines.append("**市场状态**")
     for market, label in [("US", "🇺🇸 US"), ("HK", "🇭🇰 HK"), ("CN", "🇨🇳 CN")]:
         trading = "交易中" if is_market_trading(market) else "休市"
         snap = snapshot_summary.get(market)
@@ -256,12 +258,9 @@ def build_status_card() -> dict:
             lines.append(f"{label}: {trading}，最近 {snap['ticker']} {snap['time']}（{age}前）")
         else:
             lines.append(f"{label}: {trading}，无快照")
-    snapshot_warn = "，接近上限" if snapshot_size >= SNAPSHOT_MAX_BYTES * 0.8 else ""
-    lines.append(f"快照占用: {format_size(snapshot_size)} / {format_size(SNAPSHOT_MAX_BYTES)}{snapshot_warn}")
     lines.append("")
 
     lines.append("**算法**")
-    lines.append(f"监控标的: {algo['total']} 个")
     lines.append(f"5日量比可用: {algo['historical_ready']} 个，样本不足: {algo['historical_insufficient']} 个")
     lines.append(f"日内量比可用: {algo['intraday_ready']} 个")
     if algo["latest_calc"]:
@@ -270,14 +269,18 @@ def build_status_card() -> dict:
         lines.append(f"最新计算: {ticker} 5日 {hist_ratio:.2f} / 日内 {intraday_ratio:.2f} ({calc_time})")
     lines.append("")
 
-    lines.append("**信号 / 配置**")
-    if latest_signal:
-        ticker, sig_type, source, ts = latest_signal
-        src_label = "日内+5日" if source == "mixed" else ("日内" if source == "intraday" else "5日")
-        sig_time = datetime.fromisoformat(ts).strftime("%H:%M:%S")
-        lines.append(f"今日信号: {signal_count} 个，最近 {ticker} {sig_type} [{src_label}] {sig_time}")
-    else:
-        lines.append(f"今日信号: {signal_count} 个，最近无信号")
+    # 运维视角：服务状态、存储、配置
+    lines.append("**服务**")
+    for key, label in [("ws", "WebSocket"), ("bot", "飞书机器人"), ("cron", "Cron"), ("db", "数据库")]:
+        icon, detail = service_status.get(key, ("❓", "未知"))
+        if key == "db":
+            db_warn = "，接近上限" if db_size >= DB_MAX_BYTES * 0.8 else ""
+            detail = f"schema {schema_version}，{ratio_count:,} 条，{format_size(db_size)}/{format_size(DB_MAX_BYTES)}{db_warn}"
+        lines.append(f"{icon} {label}: {detail}")
+    lines.append(f"✅ LLM: {llm.get('model', '未配置')}，今日 {llm_count} 次")
+    snapshot_warn = "，接近上限" if snapshot_size >= SNAPSHOT_MAX_BYTES * 0.8 else ""
+    lines.append(f"快照: {format_size(snapshot_size)} / {format_size(SNAPSHOT_MAX_BYTES)}{snapshot_warn}")
+    lines.append("")
     lines.append(
         "参数: "
         f"历史 {params.get('volume_ratio_window', 5)}日，"
@@ -431,13 +434,15 @@ def build_signals_card() -> dict:
         name = name or ticker
         change = float(change or 0)
         direction = "↑" if change > 0 else ("↓" if change < 0 else "─")
+        # #6 方向标识 emoji
+        dir_icon = "🔴" if change > 0 else ("🟢" if change < 0 else "⚪")
         dt = datetime.fromisoformat(ts).strftime("%H:%M")
         ratio_display = format_ratio_display(ratio or 0)
         src = "日内+5日" if source == "mixed" else ("日内" if source == "intraday" else "5日")
         table_rows.append({
             "time": dt,
             "ticker": f"{ticker}-{name}",
-            "change": f"{direction}{abs(change):.1f}%",
+            "change": f"{dir_icon}{direction}{abs(change):.1f}%",
             "ratio": ratio_display,
             "signal": sig_type or "",
             "source": src,
@@ -526,6 +531,7 @@ def build_sync_card() -> dict:
 def build_brief_card() -> dict:
     """构建量比简报卡片（飞书原生表格）"""
     from compute import compute_all
+    from alert import _fetch_trend_data, _annotate_trend
 
     results = compute_all()
     if not results:
@@ -536,11 +542,23 @@ def build_brief_card() -> dict:
         }
 
     sorted_results = sorted(results, key=lambda x: x.get("ratio", 0), reverse=True)
+
+    # #4 趋势上下文
+    trend_data = _fetch_trend_data([r.get("ticker", "") for r in sorted_results])
+    _annotate_trend(sorted_results, trend_data)
+
     elements = build_brief_elements(sorted_results)
+
+    # #1 标题区分 "有关注" vs "无异常"
+    has_attention = any(
+        r.get("ratio", 0) > 2.0 or r.get("ratio", 0) < 0.6
+        for r in sorted_results
+    )
+    status_tag = "有关注" if has_attention else "无异常"
 
     return {
         "config": {"wide_screen_mode": True},
-        "header": {"title": {"tag": "plain_text", "content": f"📋 量比简报 {datetime.now().strftime('%H:%M')}"}},
+        "header": {"title": {"tag": "plain_text", "content": f"📋 量比简报 {datetime.now().strftime('%H:%M')} — {status_tag}"}},
         "elements": elements,
     }
 

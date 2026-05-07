@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from core.config import load_config
 from core.market import get_ticker_name
-from core.display import format_ratio_display, format_ticker_line
+from core.display import format_ratio_display, format_ticker_line, get_currency_symbol
 
 
 # === 信号规则 ===
@@ -77,8 +77,8 @@ PROMPT_BRIEF_TEMPLATE = """你是量比分析专家。以下是当前持仓组�
 限制150字以内。"""
 
 
-def detect_signals(results: List[dict]) -> List[dict]:
-    """检测触发的信号（historical + intraday 双路径）"""
+def detect_signals(results: List[dict]) -> tuple:
+    """检测触发的信号（historical + intraday 双路径）。返回 (alerts, expired_mutes)。"""
     from core.market import get_market, is_market_trading
 
     alerts = []
@@ -207,7 +207,7 @@ def detect_signals(results: List[dict]) -> List[dict]:
             seen[ticker] = alert
         else:
             seen[ticker] = merge_alerts(seen[ticker], alert)
-    return list(seen.values())
+    return list(seen.values()), expired_keys
 
 
 def merge_alerts(existing: dict, incoming: dict) -> dict:
@@ -279,24 +279,27 @@ def format_alert_card(alert: dict, analysis: Optional[str] = None) -> dict:
 
     title = f"{header_icon} 【{type_label}】{ticker}-{name} {direction}"
 
-    # 内容
+    # #3 价格符号按市场区分
+    symbol = get_currency_symbol(ticker)
+
+    # 内容 — #2 LLM 分析提权：放在价格/量比之后、明细之前
     lines = [
-        f"**当前价:** ${price} ({direction}{abs(change):.2f}%)",
-        f"**主触发量比:** {ratio:.2f} {ratio_display}",
-        f"**信号:** {signal_display}",
-        f"**时间:** {datetime.now().strftime('%H:%M:%S')}",
+        f"**当前价:** {symbol}{price} ({direction}{abs(change):.2f}%)",
+        f"**主触发量比({type_label}):** {ratio:.2f} {ratio_display}",
     ]
+    # LLM 分析紧跟主触发量比
+    if analysis:
+        lines.append(f"**LLM分析:** {analysis}")
+    # 量比明细 + 信号 + 时间
     sample_days = alert.get("historical_sample_days", 0)
     if source in ("historical", "mixed") or historical_ratio > 0:
         hist_text = f"{historical_ratio:.2f} {format_ratio_display(historical_ratio)}" if historical_ratio > 0 else "数据不足"
-        lines.insert(3, f"**5日量比:** {hist_text}（样本 {sample_days}/5）")
+        lines.append(f"**5日量比:** {hist_text}（样本 {sample_days}/5）")
     if source in ("intraday", "mixed") or intraday_ratio > 0:
         intraday_text = f"{intraday_ratio:.2f} {format_ratio_display(intraday_ratio)}" if intraday_ratio > 0 else "数据不足"
-        insert_at = 4 if any(line.startswith("**5日量比:**") for line in lines) else 3
-        lines.insert(insert_at, f"**日内量比:** {intraday_text}")
-    if analysis:
-        lines.append("")
-        lines.append(f"**LLM分析:** {analysis}")
+        lines.append(f"**日内量比:** {intraday_text}")
+    lines.append(f"**信号:** {signal_display}")
+    lines.append(f"**时间:** {datetime.now().strftime('%H:%M:%S')}")
 
     content = "\n".join(lines)
 
@@ -485,6 +488,74 @@ def should_push(ticker: str, new_state: str) -> bool:
     return True
 
 
+def _build_batch_card(alerts_with_analysis: list) -> dict:
+    """将多个告警合并为一张飞书卡片（表格 + LLM 分析）"""
+    from core.display import build_market_table
+
+    # 按市场分组
+    us, hk, cn = [], [], []
+    for alert, analysis in alerts_with_analysis:
+        ticker = alert.get("ticker", "")
+        change = float(alert.get("change_pct") or 0)
+        direction = "↑" if change > 0 else ("↓" if change < 0 else "─")
+        entry = {
+            "ticker": ticker,
+            "name": alert.get("name", ticker),
+            "price": alert.get("price", 0),
+            "change_pct": change,
+            "ratio": alert.get("ratio", 0),
+            "ratio_intraday": alert.get("intraday_ratio", 0),
+            "historical_sample_days": alert.get("historical_sample_days", 0),
+            "_analysis": analysis,
+            "_signals": ", ".join(alert.get("triggered_signals", [])) or alert.get("signal", ""),
+        }
+        if ticker.endswith(".US"):
+            us.append(entry)
+        elif ticker.endswith(".HK"):
+            hk.append(entry)
+        else:
+            cn.append(entry)
+
+    # 构建表格元素
+    elements = []
+    for label, tickers in [("🇺🇸 美股", us), ("🇭🇰 港股", hk), ("🇨🇳 A股", cn)]:
+        if not tickers:
+            continue
+        elements.extend(build_market_table(label, tickers))
+
+    # LLM 分析汇总
+    analysis_lines = []
+    for alert, analysis in alerts_with_analysis:
+        if analysis:
+            ticker = alert.get("ticker", "?")
+            name = alert.get("name", ticker)
+            analysis_lines.append(f"**{ticker}-{name}:** {analysis}")
+    if analysis_lines:
+        elements.append({"tag": "hr"})
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(analysis_lines)}})
+
+    count = len(alerts_with_analysis)
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"title": {"tag": "plain_text", "content": f"🚨 量比告警 ({count}个信号)"}},
+        "elements": elements,
+    }
+
+
+def _build_mute_expiry_card(expired_tickers: list) -> dict:
+    """静默到期通知卡片"""
+    lines = [f"以下标的静默期已到期，恢复信号推送：", ""]
+    for ticker in expired_tickers:
+        lines.append(f"  {ticker}")
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"title": {"tag": "plain_text", "content": "🔔 静默到期通知"}},
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}}
+        ],
+    }
+
+
 def scan_and_alert():
     """扫描并发送告警，触发信号时调用 LLM 分析（带去重状态机）"""
     from compute import compute_all, save_signal
@@ -504,7 +575,7 @@ def scan_and_alert():
         return
 
     results = compute_all()
-    alerts = detect_signals(results)
+    alerts, expired_mutes = detect_signals(results)
 
     with open(lock_file, "a+") as lf:
         try:
@@ -555,8 +626,9 @@ def scan_and_alert():
             pending_alerts.append(alert)
 
     # LLM 和飞书网络请求放到锁外，避免慢 API 阻塞下一轮 cron 扫描。
+    # #10: 收集所有告警后合并为单张卡片
+    alerts_with_analysis = []
     seen_tickers = set()
-    pushed_count = 0
     for alert in pending_alerts:
         ticker = alert.get("ticker", "")
         ratio = alert.get("ratio", 0)
@@ -586,15 +658,67 @@ def scan_and_alert():
             llm_analysis=analysis or "", notified=1,
         )
 
-        card = format_alert_card(alert, analysis)
         change = float(alert.get("change_pct") or 0)
         direction = "↑" if change > 0 else ("↓" if change < 0 else "─")
         print(f"[alert] {ticker}-{name} {direction}{abs(change):.2f}% 量比{ratio:.2f} {source}")
-        send_feishu_card(card)
-        pushed_count += 1
-        print("---")
 
-    print(f"[alert] 推送完成: {pushed_count}/{len(pending_alerts)} 个信号")
+        alerts_with_analysis.append((alert, analysis))
+
+    # #10: 发送合并卡片
+    if alerts_with_analysis:
+        card = _build_batch_card(alerts_with_analysis)
+        send_feishu_card(card)
+        print(f"[alert] 推送完成: {len(alerts_with_analysis)} 个信号（合并卡片）")
+
+    # #8: 静默到期通知
+    if expired_mutes:
+        mute_card = _build_mute_expiry_card(expired_mutes)
+        send_feishu_card(mute_card)
+        print(f"[alert] 静默到期通知: {', '.join(expired_mutes)}")
+
+
+def _fetch_trend_data(tickers: list) -> dict:
+    """查询 30 分钟前的量比记录，返回 {ticker: historical_ratio} 映射。"""
+    import sqlite3 as _sqlite3
+    from datetime import timedelta
+
+    if not DB_PATH.exists():
+        return {}
+    now = datetime.now()
+    t_lo = (now - timedelta(minutes=35)).isoformat()
+    t_hi = (now - timedelta(minutes=25)).isoformat()
+    ticker_set = set(tickers)
+    result = {}
+    try:
+        with _sqlite3.connect(DB_PATH, timeout=5) as conn:
+            rows = conn.execute("""
+                SELECT ticker, historical_ratio
+                FROM volume_ratios
+                WHERE timestamp BETWEEN ? AND ?
+            """, (t_lo, t_hi)).fetchall()
+            for ticker, ratio in rows:
+                if ticker in ticker_set and ratio and ratio > 0:
+                    result[ticker] = ratio
+    except _sqlite3.Error:
+        pass
+    return result
+
+
+def _annotate_trend(sorted_results: list, trend_data: dict):
+    """为 sorted_results 中每个 dict 添加 _trend 字段。"""
+    for r in sorted_results:
+        ticker = r.get("ticker", "")
+        current = r.get("ratio", 0)
+        old = trend_data.get(ticker)
+        if old and old > 0 and current > 0:
+            if current > old * 1.1:
+                r["_trend"] = "↑"
+            elif current < old * 0.9:
+                r["_trend"] = "↓"
+            else:
+                r["_trend"] = "→"
+        else:
+            r["_trend"] = "→"
 
 
 def send_brief_report():
@@ -625,15 +749,33 @@ def send_brief_report():
     # 按量比排序
     sorted_results = sorted(results, key=lambda x: x.get("ratio", 0), reverse=True)
 
+    # #4 趋势上下文：查询 30 分钟前量比，标注趋势
+    trend_data = _fetch_trend_data([r.get("ticker", "") for r in sorted_results])
+    _annotate_trend(sorted_results, trend_data)
+
+    # #1 标题区分 "有关注" vs "无异常"
+    has_attention = any(
+        r.get("ratio", 0) > 2.0 or r.get("ratio", 0) < 0.6
+        for r in sorted_results
+    )
+
     # 构建飞书原生表格
     from core.display import build_brief_elements
     elements = build_brief_elements(sorted_results)
 
-    # 构建纯文本用于 LLM prompt
+    # 构建纯文本用于 LLM prompt（#9 加入日内量比，#3 价格符号，#4 趋势）
     brief_lines = []
     for r in sorted_results:
-        name = r.get("name", r["ticker"])
-        brief_lines.append(f"{r['ticker']}-{name} 价格${r.get('price',0)} 涨跌{r.get('change_pct',0):.1f}% 量比{r.get('ratio',0):.2f}")
+        name = r.get("name", r.get("ticker", "?"))
+        ticker = r.get("ticker", "?")
+        symbol = get_currency_symbol(ticker)
+        trend = r.get("_trend", "→")
+        brief_lines.append(
+            f"{ticker}-{name} 价格{symbol}{r.get('price',0)} "
+            f"涨跌{r.get('change_pct',0):.1f}% "
+            f"5日量比{r.get('ratio',0):.2f}{trend} "
+            f"日内量比{r.get('ratio_intraday',0):.2f}"
+        )
     brief_text = "\n".join(brief_lines)
 
     # 调用 LLM 整体解读
@@ -645,15 +787,16 @@ def send_brief_report():
         elements.append({"tag": "hr"})
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**LLM解读:** {analysis}"}})
 
-    # 构建卡片
+    # 构建卡片（#1 标题区分）
     now = datetime.now().strftime('%H:%M')
+    status_tag = "有关注" if has_attention else "无异常"
     card = {
         "config": {"wide_screen_mode": True},
-        "header": {"title": {"tag": "plain_text", "content": f"📋 量比简报 {now}"}},
+        "header": {"title": {"tag": "plain_text", "content": f"📋 量比简报 {now} — {status_tag}"}},
         "elements": elements
     }
 
-    print(f"[alert] 简报发送: {len(sorted_results)} 个标的")
+    print(f"[alert] 简报发送: {len(sorted_results)} 个标的, {status_tag}")
     send_feishu_card(card)
 
 

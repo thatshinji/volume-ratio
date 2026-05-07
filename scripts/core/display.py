@@ -5,6 +5,15 @@
 from typing import List
 
 
+def get_currency_symbol(ticker: str) -> str:
+    """根据 ticker 后缀返回货币符号"""
+    if ticker.endswith(".CN") or ticker.endswith(".SH") or ticker.endswith(".SZ"):
+        return "¥"
+    if ticker.endswith(".HK"):
+        return "HK$"
+    return "$"
+
+
 def format_size(size_bytes: int) -> str:
     """Format bytes using B/KB/MB/GB units."""
     if size_bytes < 1024:
@@ -56,15 +65,22 @@ def build_market_table(label: str, tickers: list) -> list:
     """为一个市场构建飞书原生表格元素"""
     # 飞书表格 page_size 限制，最大 100
     MAX_PAGE_SIZE = 100
+    # #4 检测是否有趋势数据
+    has_trend = any("_trend" in r for r in tickers)
+
     columns = [
         {"name": "ticker", "display_name": "标的", "width": "auto", "horizontal_align": "left", "data_type": "text"},
         {"name": "price", "display_name": "价格", "width": "auto", "horizontal_align": "right", "data_type": "text"},
         {"name": "change", "display_name": "涨跌", "width": "auto", "horizontal_align": "right", "data_type": "text"},
         {"name": "ratio", "display_name": "5日量比", "width": "auto", "horizontal_align": "right", "data_type": "text"},
+    ]
+    if has_trend:
+        columns.append({"name": "trend", "display_name": "趋势", "width": "auto", "horizontal_align": "center", "data_type": "text"})
+    columns.extend([
         {"name": "intraday", "display_name": "日内", "width": "auto", "horizontal_align": "right", "data_type": "text"},
         {"name": "samples", "display_name": "样本", "width": "auto", "horizontal_align": "right", "data_type": "text"},
         {"name": "status", "display_name": "状态", "width": "auto", "horizontal_align": "left", "data_type": "text"},
-    ]
+    ])
 
     rows = []
     for r in tickers[:MAX_PAGE_SIZE]:
@@ -77,15 +93,21 @@ def build_market_table(label: str, tickers: list) -> list:
         direction = "↑" if change > 0 else ("↓" if change < 0 else "─")
         ratio_display = format_ratio_display(ratio)
         emoji = "🔥" if ratio > 2.0 else ("⚠️" if ratio < 0.8 else "✅")
-        rows.append({
+        symbol = get_currency_symbol(ticker)
+        row = {
             "ticker": f"{ticker}-{name}",
-            "price": f"${price}",
+            "price": f"{symbol}{price}",
             "change": f"{direction}{abs(change):.1f}%",
             "ratio": f"{ratio:.2f}",
+        }
+        if has_trend:
+            row["trend"] = r.get("_trend", "→")
+        row.update({
             "intraday": f"{intraday_ratio:.2f}" if intraday_ratio > 0 else "-",
             "samples": f"{r.get('historical_sample_days', 0)}/5",
             "status": f"{emoji} {ratio_display}",
         })
+        rows.append(row)
 
     return [
         {"tag": "markdown", "content": f"**{label}**"},
@@ -108,9 +130,9 @@ def build_market_table(label: str, tickers: list) -> list:
 
 def build_brief_elements(sorted_results: list) -> list:
     """构建简报的飞书卡片元素列表（原生表格）"""
-    us = [r for r in sorted_results if r["ticker"].endswith(".US")]
-    hk = [r for r in sorted_results if r["ticker"].endswith(".HK")]
-    cn = [r for r in sorted_results if r["ticker"].endswith((".SH", ".SZ"))]
+    us = [r for r in sorted_results if r.get("ticker", "").endswith(".US")]
+    hk = [r for r in sorted_results if r.get("ticker", "").endswith(".HK")]
+    cn = [r for r in sorted_results if r.get("ticker", "").endswith((".SH", ".SZ"))]
 
     elements = []
     for label, tickers in [("🇺🇸 美股", us), ("🇭🇰 港股", hk), ("🇨🇳 A股", cn)]:
