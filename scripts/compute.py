@@ -916,7 +916,8 @@ def save_quote_minute_bar(
         else:
             execute(conn)
         _clear_bar_caches(ticker)
-    except sqlite3.Error:
+    except sqlite3.Error as e:
+        print(f"[compute] save_quote_minute_bar 失败 {ticker}: {e}", flush=True)
         if conn is not None:
             try:
                 conn.rollback()
@@ -954,8 +955,8 @@ def save_quote_snapshot(ticker: str, data: dict, source: str = "websocket"):
                 source,
             ))
             save_quote_minute_bar(ticker, data, source=source, conn=conn)
-    except sqlite3.Error:
-        pass
+    except sqlite3.Error as e:
+        print(f"[compute] save_quote_snapshot 失败 {ticker}: {e}", flush=True)
 
 
 def save_ratio(result: dict):
@@ -1001,8 +1002,8 @@ def save_ratio(result: dict):
                 result.get("data_quality", ""),
             ))
         _last_ratio_write[ticker] = now
-    except sqlite3.Error:
-        pass
+    except sqlite3.Error as e:
+        print(f"[compute] save_ratio 失败 {ticker}: {e}", flush=True)
 
 
 def save_signal(ticker: str, name: str, signal_type: str, ratio: float,
@@ -1017,8 +1018,8 @@ def save_signal(ticker: str, name: str, signal_type: str, ratio: float,
                 (ticker, name, timestamp, signal_type, ratio, price, change_pct, source, llm_analysis, notified)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (ticker, name, now, signal_type, ratio, price, change_pct, source, llm_analysis, notified))
-    except sqlite3.Error:
-        pass
+    except sqlite3.Error as e:
+        print(f"[compute] save_signal 失败 {ticker}: {e}", flush=True)
 
 
 def get_latest_snapshot(ticker: str) -> Optional[dict]:
@@ -1044,7 +1045,9 @@ def _fetch_price_from_api(tickers: list) -> dict:
     try:
         from longbridge.openapi import OAuthBuilder, Config, QuoteContext
         token_dir = Path.home() / ".longbridge" / "openapi" / "tokens"
-        files = list(token_dir.iterdir())
+        if not token_dir.exists():
+            return {}
+        files = sorted(token_dir.iterdir())
         if not files:
             return {}
         cid = files[0].name
@@ -1060,9 +1063,7 @@ def _fetch_price_from_api(tickers: list) -> dict:
             change_pct = round((last - prev) / prev * 100, 2) if prev > 0 else None
             result[q.symbol] = {"price": last, "change_pct": change_pct, "volume": int(q.volume or 0)}
         return result
-    except BaseException as e:
-        if isinstance(e, (KeyboardInterrupt, SystemExit)):
-            raise
+    except Exception as e:
         print(f"[compute] API 价格获取失败: {e}", flush=True)
         return {}
 

@@ -132,7 +132,7 @@ def call_llm(prompt: str, model: str = None) -> Optional[str]:
 
     try:
         # Anthropic 兼容接口（MiniMax, Xiaomi, OpenAI 等都兼容）
-        endpoint = f"{base_url}/v1/messages"
+        endpoint = f"{base_url.rstrip('/')}/v1/messages"
         resp = requests.post(endpoint, headers=headers, json=payload, timeout=30)
 
         if resp.status_code == 200:
@@ -149,7 +149,7 @@ def call_llm(prompt: str, model: str = None) -> Optional[str]:
             print(f"[llm] API 错误: {resp.status_code}")
             log_llm_call(model_name, success=False)
             return None
-    except (requests.ConnectionError, requests.Timeout, ValueError) as e:
+    except (requests.ConnectionError, requests.Timeout, requests.HTTPError, ValueError, json.JSONDecodeError) as e:
         print(f"[llm] 调用异常: {e}")
         log_llm_call(model_name, success=False)
         return None

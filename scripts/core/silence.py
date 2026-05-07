@@ -11,7 +11,11 @@ def suppress_stdout():
     sys.stdout.flush()
     sys.stderr.flush()
     saved_stdout_fd = os.dup(1)
-    saved_stderr_fd = os.dup(2)
+    try:
+        saved_stderr_fd = os.dup(2)
+    except OSError:
+        os.close(saved_stdout_fd)
+        raise
     try:
         with open(os.devnull, "w") as devnull:
             os.dup2(devnull.fileno(), 1)

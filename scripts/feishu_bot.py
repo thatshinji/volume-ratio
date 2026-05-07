@@ -981,12 +981,12 @@ def handle_command(client: lark.Client, chat_id: str, text: str):
                 client, chat_id, "stop_all.py",
                 timeout_text="关停超时（>60秒），请检查日志",
                 error_prefix="关停失败",
-                delay_seconds=1,
+                delay_seconds=3,
             )
         except Exception as e:
             send_text(client, chat_id, f"关停失败: {e}")
 
-    elif text in ("/status", "/statsu"):
+    elif text == "/status":
         card = build_status_card()
         send_card(client, chat_id, card)
 
@@ -1061,7 +1061,7 @@ def main():
     if args.daemon:
         pid = os.fork()
         if pid > 0:
-            print(f"[bot] 后台运行，PID: {pid}", flush=True)
+            print(f"[bot] 后台运行，PID 将写入 {ROOT / 'logs' / 'feishu_bot.pid'}", flush=True)
             sys.exit(0)
 
         os.setsid()
@@ -1203,6 +1203,14 @@ def main():
     def signal_handler(signum, frame):
         print("\n[bot] 收到退出信号，正在关闭...", flush=True)
         running.clear()
+        try:
+            if _instance_lock_file:
+                _instance_lock_file.close()
+        except OSError:
+            pass
+        pid_file = ROOT / "logs" / "feishu_bot.pid"
+        pid_file.unlink(missing_ok=True)
+        os._exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)

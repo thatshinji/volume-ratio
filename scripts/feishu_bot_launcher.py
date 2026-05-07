@@ -105,7 +105,12 @@ def check_and_launch():
 
     # 执行 feishu_bot.py。cron 可用系统 Python 调 launcher，但机器人进程必须用项目 venv。
     python_bin = str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
-    os.execv(python_bin, [python_bin, str(SCRIPT)])
+    try:
+        os.execv(python_bin, [python_bin, str(SCRIPT)])
+    except OSError as e:
+        with open(LOG_DIR / "launcher.log", "a") as log:
+            log.write(f"[launcher] execv 失败: {python_bin} {SCRIPT}: {e}\n")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

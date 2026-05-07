@@ -49,8 +49,11 @@ def fetch_prev_close(tickers: list):
     from longbridge.openapi import OAuthBuilder, Config, QuoteContext
 
     try:
-        client_id = Path.home() / ".longbridge" / "openapi" / "tokens"
-        files = list(client_id.iterdir())
+        token_dir = Path.home() / ".longbridge" / "openapi" / "tokens"
+        if not token_dir.exists():
+            print("[ws] prev_close 缓存失败: token 目录不存在", flush=True)
+            return
+        files = sorted(token_dir.iterdir())
         if not files:
             print("[ws] prev_close 缓存失败: token 目录为空", flush=True)
             return
@@ -193,7 +196,7 @@ def get_client_id() -> str:
     token_dir = Path.home() / ".longbridge" / "openapi" / "tokens"
     if not token_dir.exists():
         raise FileNotFoundError("Longbridge token 目录不存在")
-    files = list(token_dir.iterdir())
+    files = sorted(token_dir.iterdir())
     if not files:
         raise FileNotFoundError("Longbridge token 文件不存在")
     return files[0].name
@@ -293,7 +296,7 @@ if __name__ == "__main__":
     if args.daemon:
         pid = os.fork()
         if pid > 0:
-            print(f"[ws] 后台运行，PID: {pid}", flush=True)
+            print(f"[ws] 后台运行，PID 将写入 {ROOT / 'logs' / 'ws_collect.pid'}", flush=True)
             sys.exit(0)
 
         os.setsid()

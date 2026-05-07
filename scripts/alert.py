@@ -34,15 +34,19 @@ SIGNAL_RULES = {
 
 
 def _is_end_of_day(market: str) -> bool:
-    """判断是否为市场尾盘时段（仅 CN 14:30-15:00）"""
-    if market != "CN":
-        return False
-    try:
-        from zoneinfo import ZoneInfo
-        now = datetime.now(ZoneInfo("Asia/Shanghai"))
-    except Exception:
-        now = datetime.now()
-    return (now.hour == 14 and now.minute >= 30) or now.hour == 15
+    """判断是否为市场尾盘时段（收盘前 30 分钟）"""
+    from core.market import market_now
+    now = market_now(market)
+    if market == "CN":
+        # A股 15:00 收盘，尾盘 14:30-14:59
+        return now.hour == 14 and now.minute >= 30
+    elif market == "HK":
+        # 港股 16:00 收盘，尾盘 15:30-15:59
+        return now.hour == 15 and now.minute >= 30
+    elif market == "US":
+        # 美股 16:00 ET 收盘，尾盘 15:30-15:59 ET
+        return now.hour == 15 and now.minute >= 30
+    return False
 
 
 # === LLM Prompt 模板 ===
@@ -86,20 +90,23 @@ def detect_signals(results: List[dict]) -> List[dict]:
     now = datetime.now()
     mute_dirty = False
 
+    # 先清理过期和格式错误的 mute 条目，避免遍历中修改字典
+    expired_keys = []
+    for k, v in list(mute_list.items()):
+        try:
+            until = datetime.fromisoformat(v)
+            if now >= until:
+                expired_keys.append(k)
+        except (ValueError, TypeError):
+            expired_keys.append(k)
+    for k in expired_keys:
+        del mute_list[k]
+        mute_dirty = True
+
     for r in results:
         ticker = r.get("ticker", "")
         if ticker in mute_list:
-            # 检查是否过期
-            try:
-                until = datetime.fromisoformat(mute_list[ticker])
-                if now < until:
-                    continue  # 仍在静默期，跳过
-                else:
-                    del mute_list[ticker]  # 过期，移除
-                    mute_dirty = True
-            except (ValueError, TypeError):
-                del mute_list[ticker]  # 格式错误，移除
-                mute_dirty = True
+            continue  # 仍在静默期，跳过
         market = get_market(ticker)
         if not is_market_trading(market):
             continue

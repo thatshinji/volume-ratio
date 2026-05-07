@@ -37,7 +37,9 @@ def _fetch_trading_days(market: str, start: date, end: date) -> set:
         import os
         from longbridge.openapi import OAuthBuilder, Config, QuoteContext, Market
         token_dir = os.path.expanduser("~/.longbridge/openapi/tokens")
-        files = os.listdir(token_dir)
+        if not os.path.isdir(token_dir):
+            return set()
+        files = sorted(os.listdir(token_dir))
         if not files:
             return set()
         cid = files[0]
@@ -60,9 +62,7 @@ def _fetch_trading_days(market: str, start: date, end: date) -> set:
         while len(_trading_days_range_cache) > _TRADING_DAYS_CACHE_MAX:
             _trading_days_range_cache.pop(next(iter(_trading_days_range_cache)))
         return days
-    except BaseException as e:
-        if isinstance(e, (KeyboardInterrupt, SystemExit)):
-            raise
+    except Exception as e:
         print(f"[market] trading_days 查询失败 {market} {start}~{end}: {type(e).__name__}: {e}", flush=True)
         return set()
 
@@ -107,6 +107,8 @@ def is_trading_day_on(market: str, target_date: date) -> bool:
     end = target_date + timedelta(days=5)
     trading_days = _fetch_trading_days(market, start, end)
     _trading_days_lookup_cache[market] = (start, end, trading_days)
+    while len(_trading_days_lookup_cache) > _TRADING_DAYS_CACHE_MAX:
+        _trading_days_lookup_cache.pop(next(iter(_trading_days_lookup_cache)))
     if not trading_days:
         return True
     return target_date in trading_days

@@ -101,7 +101,10 @@ def format_ticker_output(result: dict, with_analysis: bool = False) -> str:
     ratio = result.get("ratio", 0)
     signal_detail = result.get("signal_detail", "")
 
-    output = f"{format_ticker_line(ticker, name, change, ratio)}  ${price:.2f}"
+    from core.market import get_market
+    market = get_market(ticker)
+    currency = {"CN": "¥", "HK": "HK$"}.get(market, "$")
+    output = f"{format_ticker_line(ticker, name, change, ratio)}  {currency}{price:.2f}"
 
     if signal_detail:
         output += f"\n  信号: {signal_detail}"
@@ -307,7 +310,10 @@ def cmd_signals():
         name = name or ticker
         change = float(change or 0)
         direction = "↑" if change > 0 else ("↓" if change < 0 else "─")
-        dt = datetime.fromisoformat(ts).strftime("%H:%M:%S")
+        try:
+            dt = datetime.fromisoformat(ts).strftime("%H:%M:%S")
+        except (ValueError, AttributeError):
+            dt = "??:??:??"
         ratio_display = format_ratio_display(ratio or 0)
         src_label = "日内+5日" if source == "mixed" else ("日内" if source == "intraday" else "5日")
         print(f"  [{dt}] {ticker} {name} {direction}{abs(change):.1f}% {ratio_display} ({sig_type}) [{src_label}]")

@@ -20,7 +20,9 @@ def _get_longbridge_context():
     from longbridge.openapi import OAuthBuilder, Config, QuoteContext, TradeContext
 
     token_dir = Path.home() / ".longbridge" / "openapi" / "tokens"
-    files = list(token_dir.iterdir())
+    if not token_dir.exists():
+        raise FileNotFoundError(f"长桥 token 目录不存在: {token_dir}")
+    files = sorted(token_dir.iterdir())
     if not files:
         raise OSError("长桥 token 目录为空，请先登录长桥")
     cid = files[0].name
@@ -246,9 +248,7 @@ def run_sync(groups: list = None, restart_ws: bool = True) -> dict:
 
     try:
         quote_ctx, trade_ctx = _get_longbridge_context()
-    except BaseException as e:
-        if isinstance(e, (KeyboardInterrupt, SystemExit)):
-            raise
+    except Exception as e:
         print(f"[sync] 长桥上下文初始化失败: {e}", flush=True)
         return {"added": [], "removed": [], "positions": [], "watchlist": [], "final": load_config().get("watchlist", {})}
 

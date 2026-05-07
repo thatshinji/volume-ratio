@@ -283,18 +283,22 @@ def emergency_trim_database(dry_run: bool = False):
             )
             return cursor.rowcount
 
+    max_iterations = 20
     for table, timestamp_column in tables:
         removed_total = 0
-        while DB_PATH.stat().st_size > DB_MAX_BYTES:
+        iterations = 0
+        while DB_PATH.stat().st_size > DB_MAX_BYTES and iterations < max_iterations:
             removed = delete_oldest_batch(table, timestamp_column)
             if removed <= 0:
                 break
             removed_total += removed
-            vacuum_database()
-            if removed_total > 0:
-                print(f"[cleanup] {table}: 容量兜底删除最旧记录 {removed_total} 条")
+            iterations += 1
+        if removed_total > 0:
+            print(f"[cleanup] {table}: 容量兜底删除最旧记录 {removed_total} 条")
         if DB_PATH.stat().st_size <= DB_MAX_BYTES:
             break
+
+    vacuum_database()
 
     size = DB_PATH.stat().st_size
     if size > DB_MAX_BYTES:

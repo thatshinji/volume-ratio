@@ -90,6 +90,7 @@ def save_snapshot(ticker: str, data: dict):
 
     with open(filepath, "a", encoding="utf-8") as f:
         f.write(json.dumps(data, ensure_ascii=False) + "\n")
+        f.flush()
 
     print(f"[collect] {ticker} -> {filepath.name}")
 

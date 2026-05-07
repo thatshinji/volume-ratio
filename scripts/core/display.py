@@ -71,8 +71,8 @@ def build_market_table(label: str, tickers: list) -> list:
         ratio = r.get("ratio", 0)
         intraday_ratio = r.get("ratio_intraday", 0)
         change = r.get("change_pct", 0)
-        name = r.get("name", r["ticker"])
-        ticker = r["ticker"]
+        ticker = r.get("ticker", "?")
+        name = r.get("name", ticker)
         price = r.get("price", 0)
         direction = "↑" if change > 0 else ("↓" if change < 0 else "─")
         ratio_display = format_ratio_display(ratio)
@@ -82,7 +82,7 @@ def build_market_table(label: str, tickers: list) -> list:
             "price": f"${price}",
             "change": f"{direction}{abs(change):.1f}%",
             "ratio": f"{ratio:.2f}",
-            "intraday": f"{intraday_ratio:.2f}" if intraday_ratio else "-",
+            "intraday": f"{intraday_ratio:.2f}" if intraday_ratio > 0 else "-",
             "samples": f"{r.get('historical_sample_days', 0)}/5",
             "status": f"{emoji} {ratio_display}",
         })

@@ -29,9 +29,12 @@ def load_config() -> dict:
     except OSError:
         return {}
     if mtime != _config_mtime:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            _config_cache = yaml.safe_load(f)
-        _config_mtime = mtime
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                _config_cache = yaml.safe_load(f)
+            _config_mtime = mtime
+        except OSError:
+            return _config_cache or {}
     return _config_cache or {}
 
 

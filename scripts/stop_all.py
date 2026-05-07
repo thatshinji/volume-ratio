@@ -40,7 +40,10 @@ def kill_process_by_name(name: str):
         if name in line and "grep" not in line:
             parts = line.split()
             if len(parts) >= 2:
-                pid = int(parts[1])
+                try:
+                    pid = int(parts[1])
+                except ValueError:
+                    continue
                 try:
                     os.kill(pid, signal.SIGTERM)
                     killed.append(pid)
