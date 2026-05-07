@@ -19,7 +19,7 @@ ROOT = Path(__file__).parent.parent
 # 将 scripts/ 加入 sys.path，供 from compute import 等使用
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from core.config import load_config
+from core.config import load_config, MARKET_END_OF_DAY
 from core.market import get_ticker_name
 from core.display import format_ratio_display, format_ticker_line, get_currency_symbol
 
@@ -37,16 +37,10 @@ def _is_end_of_day(market: str) -> bool:
     """判断是否为市场尾盘时段（收盘前 30 分钟）"""
     from core.market import market_now
     now = market_now(market)
-    if market == "CN":
-        # A股 15:00 收盘，尾盘 14:30-14:59
-        return now.hour == 14 and now.minute >= 30
-    elif market == "HK":
-        # 港股 16:00 收盘，尾盘 15:30-15:59
-        return now.hour == 15 and now.minute >= 30
-    elif market == "US":
-        # 美股 16:00 ET 收盘，尾盘 15:30-15:59 ET
-        return now.hour == 15 and now.minute >= 30
-    return False
+    eod = MARKET_END_OF_DAY.get(market)
+    if not eod:
+        return False
+    return now.hour == eod[0] and now.minute >= eod[1]
 
 
 # === LLM Prompt 模板 ===
@@ -89,7 +83,7 @@ def detect_signals(results: List[dict]) -> tuple:
     params = config.get("params", {})
     alert_threshold = params.get("alert_threshold", 2.0)
     shrink_threshold = params.get("shrink_threshold", 0.6)
-    mute_list = config.get("mute", {})
+    mute_list = dict(config.get("mute", {}))
     now = datetime.now()
     mute_dirty = False
 
@@ -199,6 +193,7 @@ def detect_signals(results: List[dict]) -> tuple:
 
     # 保存配置（仅在移除过期 mute 时）
     if mute_dirty:
+        config["mute"] = mute_list
         from core.config import save_config
         save_config(config)
 
@@ -703,7 +698,6 @@ def scan_and_alert():
 
 def _fetch_trend_data(tickers: list) -> dict:
     """查询 30 分钟前的量比记录，返回 {ticker: (historical_ratio, intraday_ratio)} 映射。"""
-    import sqlite3 as _sqlite3
     from datetime import timedelta
 
     if not DB_PATH.exists():
@@ -714,7 +708,7 @@ def _fetch_trend_data(tickers: list) -> dict:
     ticker_set = set(tickers)
     result = {}
     try:
-        with _sqlite3.connect(DB_PATH, timeout=5) as conn:
+        with sqlite3.connect(DB_PATH, timeout=5) as conn:
             rows = conn.execute("""
                 SELECT ticker, historical_ratio, intraday_ratio
                 FROM volume_ratios
@@ -723,7 +717,7 @@ def _fetch_trend_data(tickers: list) -> dict:
             for ticker, hist, intra in rows:
                 if ticker in ticker_set:
                     result[ticker] = (hist or 0, intra or 0)
-    except _sqlite3.Error:
+    except sqlite3.Error:
         pass
     return result
 

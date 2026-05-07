@@ -45,8 +45,8 @@ def start_websocket():
 def start_feishu_bot():
     """通过 launcher 启动或确认飞书机器人进程。"""
     launcher = SCRIPTS_DIR / "feishu_bot_launcher.py"
-    python_bin = str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
-    subprocess.run([python_bin, str(launcher)], check=False)
+    venv_python = str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
+    subprocess.run([venv_python, str(launcher)], check=False)
     pid_file = LOG_DIR / "feishu_bot.pid"
     if pid_file.exists():
         print(f"[start] 飞书机器人 PID: {pid_file.read_text().strip()}")
@@ -62,21 +62,21 @@ def main():
     bot_launcher_script = SCRIPTS_DIR / "feishu_bot_launcher.py"
     alert_script = SCRIPTS_DIR / "alert.py"
     cleanup_script = SCRIPTS_DIR / "cleanup.py"
-    python_bin = str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
-    launcher_python = sys.executable
+    venv_python = str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
+    system_python = sys.executable
 
     sync_script = SCRIPTS_DIR / "longbridge_sync.py"
 
     # 1. 添加 cron 任务
     print("[1/4] 配置 cron 任务...")
-    add_cron(f"*/1 * * * 1-5 {launcher_python} {ws_launcher_script} >> {LOG_DIR}/launcher.log 2>&1")
-    add_cron(f"*/1 * * * * {python_bin} {bot_launcher_script} >> {LOG_DIR}/launcher.log 2>&1")
-    add_cron(f"*/1 * * * 1-5 {python_bin} {alert_script} >> {LOG_DIR}/alert.log 2>&1")
-    add_cron(f"*/30 * * * 1-5 {python_bin} {alert_script} --brief >> {LOG_DIR}/brief.log 2>&1")
-    add_cron(f"*/30 * * * 1-5 {python_bin} {sync_script} >> {LOG_DIR}/sync.log 2>&1")
-    add_cron(f"0 * * * * {python_bin} {cleanup_script} >> {LOG_DIR}/cleanup.log 2>&1")
+    add_cron(f"*/1 * * * 1-5 {system_python} {ws_launcher_script} >> {LOG_DIR}/launcher.log 2>&1")
+    add_cron(f"*/1 * * * * {venv_python} {bot_launcher_script} >> {LOG_DIR}/launcher.log 2>&1")
+    add_cron(f"*/1 * * * 1-5 {venv_python} {alert_script} >> {LOG_DIR}/alert.log 2>&1")
+    add_cron(f"*/30 * * * 1-5 {venv_python} {alert_script} --brief >> {LOG_DIR}/brief.log 2>&1")
+    add_cron(f"*/30 * * * 1-5 {venv_python} {sync_script} >> {LOG_DIR}/sync.log 2>&1")
+    add_cron(f"0 * * * * {venv_python} {cleanup_script} >> {LOG_DIR}/cleanup.log 2>&1")
     backfill_script = SCRIPTS_DIR / "backfill_signals.py"
-    add_cron(f"0 17 * * 1-5 {python_bin} {backfill_script} >> {LOG_DIR}/backfill.log 2>&1")
+    add_cron(f"0 17 * * 1-5 {venv_python} {backfill_script} >> {LOG_DIR}/backfill.log 2>&1")
     print()
 
     # 2. 启动 WebSocket 采集进程

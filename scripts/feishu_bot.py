@@ -36,6 +36,7 @@ from lark_oapi.core.const import UTF_8
 from core.config import load_config, parse_ticker, remove_ticker_from_config, save_config
 from core.market import get_all_tickers_with_names, get_ticker_name, get_market
 from core.display import format_ratio_display, format_ticker_line, build_market_table, build_brief_elements, format_size
+from core.utils import locked_pid
 
 # 全局变量
 running = threading.Event()
@@ -853,23 +854,6 @@ def _check_component_status() -> dict:
 
     status = {}
 
-    def locked_pid(lock_path: Path, pid_path: Path) -> str:
-        if not lock_path.exists():
-            return ""
-        try:
-            with open(lock_path, "r+") as lock_file:
-                try:
-                    fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    fcntl.flock(lock_file, fcntl.LOCK_UN)
-                    return ""
-                except BlockingIOError:
-                    pid_text = lock_file.read().strip()
-                    if pid_text:
-                        pid_path.write_text(pid_text)
-                    return pid_text
-        except OSError:
-            return ""
-
     # WebSocket 采集
     ws_pid_file = ROOT / "logs" / "ws_collect.pid"
     ws_lock_pid = locked_pid(ROOT / "logs" / "ws_collect.lock", ws_pid_file)
@@ -1065,8 +1049,10 @@ def handle_command(client: lark.Client, chat_id: str, text: str):
         send_text(client, chat_id, output.strip())
 
     elif text == "/sync":
-        card = build_sync_card()
-        send_card(client, chat_id, card)
+        def _do_sync():
+            card = build_sync_card()
+            send_card(client, chat_id, card)
+        threading.Thread(target=_do_sync, daemon=True).start()
 
     elif text == "/watchlist":
         card = build_watchlist_card()
@@ -1177,10 +1163,14 @@ def main():
     )
 
     # Monkey-patch: 让 WsClient 处理 CARD 消息（原版会静默丢弃）
-    from lark_oapi.ws.const import HEADER_TYPE, HEADER_MESSAGE_ID, HEADER_TRACE_ID, HEADER_SUM, HEADER_SEQ, HEADER_BIZ_RT
-    from lark_oapi.ws.model import Response as WsResponse
-
-    original_handle = ws_client._handle_data_frame
+    # 依赖 lark-oapi 内部 API，lark-oapi>=1.0.0,<2.0.0 已验证可用
+    try:
+        from lark_oapi.ws.const import HEADER_TYPE, HEADER_MESSAGE_ID, HEADER_TRACE_ID, HEADER_SUM, HEADER_SEQ, HEADER_BIZ_RT
+        from lark_oapi.ws.model import Response as WsResponse
+    except ImportError:
+        print("[bot] 警告: lark_oapi.ws 内部 API 变更，CARD 消息处理可能不可用", flush=True)
+        HEADER_TYPE = HEADER_MESSAGE_ID = HEADER_SUM = HEADER_SEQ = HEADER_BIZ_RT = None
+        WsResponse = None
 
     async def patched_handle(frame):
         hs = frame.headers
@@ -1231,7 +1221,10 @@ def main():
         frame.payload = JSON.marshal(resp).encode(UTF_8)
         await ws_client._write_message(frame.SerializeToString())
 
-    ws_client._handle_data_frame = patched_handle
+    if HEADER_TYPE is not None:
+        ws_client._handle_data_frame = patched_handle
+    else:
+        print("[bot] 跳过 CARD 消息 patch（依赖导入失败）", flush=True)
 
     def signal_handler(signum, frame):
         print("\n[bot] 收到退出信号，正在关闭...", flush=True)

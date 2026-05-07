@@ -16,6 +16,20 @@ ROOT = Path(__file__).parent.parent.parent
 CONFIG_PATH = ROOT / "config.yaml"
 CONFIG_LOCK_PATH = ROOT / "logs" / "config.lock"
 
+# 市场交易时段配置: [(start_hour, start_min, end_hour, end_min), ...]
+MARKET_SESSIONS = {
+    "CN": [(9, 30, 11, 30), (13, 0, 15, 0)],
+    "HK": [(9, 30, 12, 0), (13, 0, 16, 0)],
+    "US": [(9, 30, 16, 0)],
+}
+
+# 尾盘时段: 收盘前 30 分钟 [(start_hour, start_min)]
+MARKET_END_OF_DAY = {
+    "CN": (14, 30),
+    "HK": (15, 30),
+    "US": (15, 30),
+}
+
 # 热加载缓存
 _config_cache = None
 _config_mtime = 0

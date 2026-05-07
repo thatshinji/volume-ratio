@@ -24,7 +24,7 @@ SCHEMA_VERSION = 4
 
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from core.config import load_config
+from core.config import load_config, MARKET_SESSIONS
 from core.market import get_market, get_all_tickers, get_ticker_name, is_market_trading
 from core.market import _is_trading_day as is_trading_day, is_trading_day_on
 from core.silence import suppress_stdout
@@ -41,7 +41,7 @@ DEFAULT_HISTORY_DAYS = 5
 INTRADAY_SIGNAL_WINDOW_MINUTES = 5
 INTRADAY_BASELINE_MINUTES = 30
 MIN_HISTORY_SAMPLES = 3
-RATIO_WRITE_INTERVAL = 300
+RATIO_WRITE_INTERVAL = 300  # 量比写入间隔（秒），避免高频写入
 
 MAX_SNAPSHOT_CACHE_ITEMS = 128
 MAX_MINUTE_BAR_CACHE_ITEMS = 128
@@ -104,11 +104,8 @@ def _minutes(t: time) -> int:
 
 
 def _market_sessions(market: str) -> list[tuple[int, int]]:
-    if market == "CN":
-        return [(_minutes(time(9, 30)), _minutes(time(11, 30))), (_minutes(time(13, 0)), _minutes(time(15, 0)))]
-    if market == "HK":
-        return [(_minutes(time(9, 30)), _minutes(time(12, 0))), (_minutes(time(13, 0)), _minutes(time(16, 0)))]
-    return [(_minutes(time(9, 30)), _minutes(time(16, 0)))]
+    sessions = MARKET_SESSIONS.get(market, MARKET_SESSIONS["US"])
+    return [(sh * 60 + sm, eh * 60 + em) for sh, sm, eh, em in sessions]
 
 
 def _is_regular_session(market: str, market_dt: datetime) -> bool:
@@ -444,38 +441,47 @@ def calc_volume_ratio(ticker: str, current_time: datetime = None, api_vol_data: 
     return detail["ratio"], detail["today_volume"], detail["avg_volume"], detail["signal"]
 
 
-def calc_historical_ratio_detail(ticker: str, current_time: datetime = None) -> dict:
+def _fallback_to_latest(ticker: str) -> list[SnapshotRecord]:
+    """非交易时段回退：读取全量快照并返回最近一天的记录。"""
+    all_records = read_market_snapshots(ticker)
+    if not all_records:
+        return []
+    latest = all_records[-1]
+    return _records_for_date(ticker, latest.market_date)
+
+
+def _resolve_session_time(ticker: str, current_time: datetime = None) -> tuple:
+    """解析当前市场时间，非交易时段回退到最近记录。
+    返回 (market_dt, market_date, target_minute, records)。
+    """
     if current_time is None:
         current_time = datetime.now()
 
-    config = load_config()
-    window = int(config.get("params", {}).get("volume_ratio_window", DEFAULT_HISTORY_DAYS))
     market = get_market(ticker)
     market_dt = _to_market_dt(current_time, market)
     market_date = market_dt.date()
     target_minute = market_dt.hour * 60 + market_dt.minute
-    current_date_is_trading = is_trading_day_on(market, market_date)
 
-    if not _is_regular_session(market, market_dt):
-        all_records = read_market_snapshots(ticker)
-        if all_records:
-            latest = all_records[-1]
-            market_date = latest.market_date
-            market_dt = latest.market_ts
-            target_minute = latest.market_minutes
-            today_records = _records_for_date(ticker, market_date)
-        else:
-            today_records = []
+    if _is_regular_session(market, market_dt):
+        records = _records_for_date(ticker, market_date)
     else:
-        today_records = _records_for_date(ticker, market_date)
-    if not today_records and not current_date_is_trading:
-        all_records = read_market_snapshots(ticker)
-        if all_records:
-            latest = all_records[-1]
-            market_date = latest.market_date
-            market_dt = latest.market_ts
-            target_minute = latest.market_minutes
-            today_records = _records_for_date(ticker, market_date)
+        records = _fallback_to_latest(ticker)
+        if records:
+            market_dt, market_date, target_minute = records[0].market_ts, records[0].market_date, records[0].market_minutes
+
+    if not records and not is_trading_day_on(market, market_date):
+        records = _fallback_to_latest(ticker)
+        if records:
+            market_dt, market_date, target_minute = records[0].market_ts, records[0].market_date, records[0].market_minutes
+
+    return market_dt, market_date, target_minute, records
+
+
+def calc_historical_ratio_detail(ticker: str, current_time: datetime = None) -> dict:
+    config = load_config()
+    window = int(config.get("params", {}).get("volume_ratio_window", DEFAULT_HISTORY_DAYS))
+    market = get_market(ticker)
+    market_dt, market_date, target_minute, today_records = _resolve_session_time(ticker, current_time)
 
     if today_records:
         latest_today = today_records[-1]
@@ -542,25 +548,11 @@ def calc_intraday_ratio_detail(ticker: str, current_time: datetime = None) -> di
     baseline_method = params.get("intraday_baseline_method", "mean")
 
     market = get_market(ticker)
-    market_dt = _to_market_dt(current_time, market)
-    market_date = market_dt.date()
-    target_minute = market_dt.hour * 60 + market_dt.minute
-    current_date_is_trading = is_trading_day_on(market, market_date)
-    if not current_date_is_trading:
+    check_dt = _to_market_dt(current_time, market)
+    if not is_trading_day_on(market, check_dt.date()):
         return _empty_intraday_detail("休市")
 
-    if not _is_regular_session(market, market_dt):
-        all_records = read_market_snapshots(ticker)
-        if all_records:
-            latest = all_records[-1]
-            market_date = latest.market_date
-            market_dt = latest.market_ts
-            target_minute = latest.market_minutes
-            records = _records_for_date(ticker, market_date)
-        else:
-            records = []
-    else:
-        records = _records_for_date(ticker, market_date)
+    market_dt, market_date, target_minute, records = _resolve_session_time(ticker, current_time)
     if not records:
         return _empty_intraday_detail("数据不足")
 
@@ -661,8 +653,151 @@ def get_db_path() -> Path:
     return DB_PATH
 
 
+def _create_tables(conn: sqlite3.Connection):
+    """创建所有表和索引（IF NOT EXISTS）。"""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS quote_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT NOT NULL,
+            market TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            market_timestamp TEXT,
+            market_date TEXT,
+            price REAL,
+            open REAL,
+            high REAL,
+            low REAL,
+            volume REAL,
+            turnover REAL,
+            change REAL,
+            change_pct REAL,
+            source TEXT DEFAULT 'websocket',
+            UNIQUE(ticker, timestamp, volume, price)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS quote_minute_bars (
+            ticker TEXT NOT NULL,
+            market TEXT NOT NULL,
+            market_date TEXT NOT NULL,
+            market_minute INTEGER NOT NULL,
+            market_timestamp TEXT NOT NULL,
+            first_timestamp TEXT NOT NULL,
+            last_timestamp TEXT NOT NULL,
+            open REAL,
+            high REAL,
+            low REAL,
+            close REAL,
+            volume REAL,
+            turnover REAL,
+            change_pct REAL,
+            source TEXT DEFAULT 'websocket',
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(ticker, market_date, market_minute)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS volume_ratios (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT NOT NULL,
+            name TEXT,
+            timestamp TEXT NOT NULL,
+            market TEXT,
+            market_timestamp TEXT,
+            market_date TEXT,
+            price REAL,
+            change_pct REAL,
+            historical_ratio REAL,
+            historical_today_volume REAL,
+            historical_avg_volume REAL,
+            historical_sample_days INTEGER,
+            historical_signal TEXT,
+            intraday_ratio REAL,
+            intraday_window_volume REAL,
+            intraday_baseline_volume REAL,
+            intraday_baseline_samples INTEGER,
+            intraday_signal TEXT,
+            cond_vol INTEGER DEFAULT 0,
+            cond_stop INTEGER DEFAULT 0,
+            cond_stable INTEGER DEFAULT 0,
+            data_quality TEXT,
+            UNIQUE(ticker, timestamp)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT NOT NULL,
+            name TEXT,
+            timestamp TEXT NOT NULL,
+            signal_type TEXT NOT NULL,
+            ratio REAL,
+            price REAL,
+            change_pct REAL,
+            source TEXT,
+            llm_analysis TEXT,
+            notified INTEGER DEFAULT 1,
+            market TEXT DEFAULT '',
+            exit_price_1d REAL,
+            exit_price_3d REAL,
+            exit_price_5d REAL,
+            return_1d REAL,
+            return_3d REAL,
+            return_5d REAL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS signal_states (
+            ticker TEXT PRIMARY KEY,
+            state TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS llm_calls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            model TEXT,
+            success INTEGER DEFAULT 1
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_quote_snapshots_ticker_time ON quote_snapshots(ticker, timestamp)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_quote_snapshots_market_date ON quote_snapshots(market, market_date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_quote_minute_bars_ticker_date ON quote_minute_bars(ticker, market_date, market_minute)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_quote_minute_bars_market_date ON quote_minute_bars(market, market_date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_volume_ratios_ticker ON volume_ratios(ticker)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_volume_ratios_timestamp ON volume_ratios(timestamp)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp)")
+
+
+def _migrate_schema(conn: sqlite3.Connection, current_version: int):
+    """处理 schema 版本迁移。"""
+    if current_version not in (2, 3, SCHEMA_VERSION):
+        for table in ("volume_ratios", "quote_snapshots", "quote_minute_bars", "signals", "signal_states", "schema_meta"):
+            conn.execute(f"DROP TABLE IF EXISTS {table}")
+        conn.execute("CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        conn.execute("INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
+    elif current_version == 2:
+        conn.execute("CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        conn.execute(
+            "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (str(SCHEMA_VERSION),),
+        )
+    elif current_version == 3:
+        for col, col_type in [("market", "TEXT"), ("exit_price_1d", "REAL"),
+                                 ("exit_price_3d", "REAL"), ("exit_price_5d", "REAL"),
+                                 ("return_1d", "REAL"), ("return_3d", "REAL"),
+                                 ("return_5d", "REAL")]:
+            default = " DEFAULT ''" if col == "market" else ""
+            try:
+                conn.execute(f"ALTER TABLE signals ADD COLUMN {col} {col_type}{default}")
+            except sqlite3.OperationalError:
+                pass
+        conn.execute("UPDATE schema_meta SET value = ? WHERE key = 'schema_version'", (str(SCHEMA_VERSION),))
+
+
 def init_db():
-    """初始化 SQLite。v3 在 v2 基础上无损增加分钟聚合表。"""
+    """初始化 SQLite。"""
     global _db_initialized
     if _db_initialized:
         return
@@ -670,161 +805,8 @@ def init_db():
     db_path = get_db_path()
     with sqlite3.connect(db_path, timeout=30) as conn:
         current_version = _get_schema_version(conn)
-        if current_version not in (2, 3, SCHEMA_VERSION):
-            conn.execute("DROP TABLE IF EXISTS volume_ratios")
-            conn.execute("DROP TABLE IF EXISTS quote_snapshots")
-            conn.execute("DROP TABLE IF EXISTS quote_minute_bars")
-            conn.execute("DROP TABLE IF EXISTS signals")
-            conn.execute("DROP TABLE IF EXISTS signal_states")
-            conn.execute("DROP TABLE IF EXISTS schema_meta")
-            conn.execute("CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-            conn.execute(
-                "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)",
-                (str(SCHEMA_VERSION),),
-            )
-        elif current_version == 2:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS schema_meta (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                )
-            """)
-            conn.execute(
-                """
-                INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)
-                ON CONFLICT(key) DO UPDATE SET value = excluded.value
-                """,
-                (str(SCHEMA_VERSION),),
-            )
-        elif current_version == 3:
-            # v3 → v4: signals 表新增 market + 胜率回填字段
-            for col, col_type in [("market", "TEXT"), ("exit_price_1d", "REAL"),
-                                     ("exit_price_3d", "REAL"), ("exit_price_5d", "REAL"),
-                                     ("return_1d", "REAL"), ("return_3d", "REAL"),
-                                     ("return_5d", "REAL")]:
-                default = " DEFAULT ''" if col == "market" else ""
-                try:
-                    conn.execute(f"ALTER TABLE signals ADD COLUMN {col} {col_type}{default}")
-                except sqlite3.OperationalError:
-                    pass  # 列已存在
-            conn.execute(
-                "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
-                (str(SCHEMA_VERSION),),
-            )
-
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS quote_snapshots (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ticker TEXT NOT NULL,
-                market TEXT NOT NULL,
-                timestamp TEXT NOT NULL,
-                market_timestamp TEXT,
-                market_date TEXT,
-                price REAL,
-                open REAL,
-                high REAL,
-                low REAL,
-                volume REAL,
-                turnover REAL,
-                change REAL,
-                change_pct REAL,
-                source TEXT DEFAULT 'websocket',
-                UNIQUE(ticker, timestamp, volume, price)
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS quote_minute_bars (
-                ticker TEXT NOT NULL,
-                market TEXT NOT NULL,
-                market_date TEXT NOT NULL,
-                market_minute INTEGER NOT NULL,
-                market_timestamp TEXT NOT NULL,
-                first_timestamp TEXT NOT NULL,
-                last_timestamp TEXT NOT NULL,
-                open REAL,
-                high REAL,
-                low REAL,
-                close REAL,
-                volume REAL,
-                turnover REAL,
-                change_pct REAL,
-                source TEXT DEFAULT 'websocket',
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY(ticker, market_date, market_minute)
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS volume_ratios (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ticker TEXT NOT NULL,
-                name TEXT,
-                timestamp TEXT NOT NULL,
-                market TEXT,
-                market_timestamp TEXT,
-                market_date TEXT,
-                price REAL,
-                change_pct REAL,
-                historical_ratio REAL,
-                historical_today_volume REAL,
-                historical_avg_volume REAL,
-                historical_sample_days INTEGER,
-                historical_signal TEXT,
-                intraday_ratio REAL,
-                intraday_window_volume REAL,
-                intraday_baseline_volume REAL,
-                intraday_baseline_samples INTEGER,
-                intraday_signal TEXT,
-                cond_vol INTEGER DEFAULT 0,
-                cond_stop INTEGER DEFAULT 0,
-                cond_stable INTEGER DEFAULT 0,
-                data_quality TEXT,
-                UNIQUE(ticker, timestamp)
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS signals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ticker TEXT NOT NULL,
-                name TEXT,
-                timestamp TEXT NOT NULL,
-                signal_type TEXT NOT NULL,
-                ratio REAL,
-                price REAL,
-                change_pct REAL,
-                source TEXT,
-                llm_analysis TEXT,
-                notified INTEGER DEFAULT 1,
-                market TEXT DEFAULT '',
-                exit_price_1d REAL,
-                exit_price_3d REAL,
-                exit_price_5d REAL,
-                return_1d REAL,
-                return_3d REAL,
-                return_5d REAL
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS signal_states (
-                ticker TEXT PRIMARY KEY,
-                state TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS llm_calls (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL,
-                model TEXT,
-                success INTEGER DEFAULT 1
-            )
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_quote_snapshots_ticker_time ON quote_snapshots(ticker, timestamp)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_quote_snapshots_market_date ON quote_snapshots(market, market_date)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_quote_minute_bars_ticker_date ON quote_minute_bars(ticker, market_date, market_minute)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_quote_minute_bars_market_date ON quote_minute_bars(market, market_date)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_volume_ratios_ticker ON volume_ratios(ticker)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_volume_ratios_timestamp ON volume_ratios(timestamp)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp)")
+        _migrate_schema(conn, current_version)
+        _create_tables(conn)
     _db_initialized = True
 
 

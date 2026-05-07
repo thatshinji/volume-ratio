@@ -17,5 +17,8 @@ data/snapshots/
 .idea/
 .vscode/
 
+# Node
+node_modules/
+
 # OS
 .DS_Store

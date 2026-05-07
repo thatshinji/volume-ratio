@@ -5,7 +5,6 @@
 """
 
 import argparse
-import fcntl
 import json
 import os
 import sqlite3
@@ -25,6 +24,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from core.config import load_config, parse_ticker, save_config
 from core.market import get_all_tickers, get_all_tickers_with_names, get_ticker_name
 from core.display import format_ratio_display, format_ticker_line, format_size
+from core.utils import locked_pid
 
 
 # === LLM Prompt 模板 ===
@@ -120,23 +120,6 @@ def format_ticker_output(result: dict, with_analysis: bool = False) -> str:
 def cmd_status():
     """系统健康状态检查"""
     print("=== 系统状态 ===")
-
-    def locked_pid(lock_path: Path, pid_path: Path) -> str:
-        if not lock_path.exists():
-            return ""
-        try:
-            with open(lock_path, "r+") as lock_file:
-                try:
-                    fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    fcntl.flock(lock_file, fcntl.LOCK_UN)
-                    return ""
-                except BlockingIOError:
-                    pid_text = lock_file.read().strip()
-                    if pid_text:
-                        pid_path.write_text(pid_text)
-                    return pid_text
-        except OSError:
-            return ""
 
     # WebSocket 采集进程
     pid_file = ROOT / "logs" / "ws_collect.pid"
@@ -419,8 +402,6 @@ def main():
     parser.add_argument("--market", type=str, help="扫描市场 (US/HK/CN)")
     parser.add_argument("--min-ratio", type=float, default=2.0, help="最小量比阈值")
     parser.add_argument("--analyze", action="store_true", help="调用 LLM AI 分析")
-    parser.add_argument("--collect", action="store_true", help="先采集最新行情再查询")
-
     # 新增命令
     parser.add_argument("--status", action="store_true", help="系统健康状态")
     parser.add_argument("--history", type=str, help="近 7 日量比趋势")
@@ -430,12 +411,6 @@ def main():
     parser.add_argument("--mute", nargs=2, metavar=("TICKER", "DURATION"), help="静默标的 (例: CLF.US 2h)")
 
     args = parser.parse_args()
-
-    if args.collect:
-        from collect import collect_all
-        print("=== 采集行情 ===")
-        collect_all()
-        print()
 
     if args.status:
         cmd_status()

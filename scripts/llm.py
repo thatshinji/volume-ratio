@@ -8,6 +8,7 @@ Usage:
     result = call_llm("分析以下数据...")
 """
 
+import json
 import sys
 import requests
 from typing import Optional

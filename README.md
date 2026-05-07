@@ -18,11 +18,12 @@
 - **交互式卡片**：关注列表可删除、全部股票可添加、长桥持仓自动同步
 - **信号去重**：同一标的会合并 5日与日内信号，再用状态机判断是否推送；支持 /mute 静默（自动过期，到期推送通知）
 - **告警合并**：多个信号触发时合并为单张飞书表格卡片，避免消息刷屏
-- **JSONL + SQLite 存储**：JSONL 保存可回放行情快照，SQLite schema v3 保存分钟聚合、量比结果、原始快照索引和信号历史
+- **JSONL + SQLite 存储**：JSONL 保存可回放行情快照，SQLite schema v4 保存分钟聚合、量比结果、原始快照索引和信号历史（含胜率回填）
 - **运行时防护**：配置原子写入、告警锁内不调用外部 API、飞书管理命令后台执行、WebSocket 退出前补写队列
 - **中文名标识**：标的显示中文名（如 `CLF.US 克利夫兰`），量比用符号+中文双标识
 - **趋势上下文**：简报中每个标的的 5日量比和日内量比分别显示与 30 分钟前的趋势对比（↑↓→）
 - **货币符号**：价格按市场显示 $ / HK$ / ¥，不再硬编码美元符号
+- **信号胜率追踪**：自动回填信号触发后 T+1/T+3/T+5 收益，按信号类型统计胜率和平均收益
 
 ### 1.2 系统架构
 
@@ -136,9 +137,10 @@ volume-ratio/
 │
 ├── scripts/
 │   ├── core/                # 核心模块
-│   │   ├── config.py        #   配置加载（热加载 + 原子写入）
-│   │   ├── market.py        #   市场判断 + 标的管理
+│   │   ├── config.py        #   配置加载（热加载 + 原子写入 + 市场时间配置）
+│   │   ├── market.py        #   市场判断 + 标的管理（带 TTL 缓存）
 │   │   ├── display.py       #   量比符号 + 格式化显示
+│   │   ├── utils.py         #   共享工具函数（locked_pid）
 │   │   └── silence.py       #   Longbridge SDK 输出静音（安全恢复 fd）
 │   ├── collect_ws.py        # WebSocket 实时行情采集
 │   ├── collect_ws_launcher.py  # WebSocket 守护进程（cron）
@@ -151,6 +153,7 @@ volume-ratio/
 │   ├── bot_start.py         # 一键启动飞书机器人
 │   ├── bot_stop.py          # 一键停止飞书机器人
 │   ├── cleanup.py           # 数据清理脚本
+│   ├── backfill_signals.py  # 信号结果回填（T+1/T+3/T+5 收益）
 │   ├── start_all.py         # 一键启动所有服务
 │   ├── stop_all.py          # 一键关停所有服务
 │   └── llm.py               # LLM 多模型调用层
@@ -391,7 +394,7 @@ python3 scripts/llm.py --test
 
 ### 7.1 服务列表
 
-项目有 6 个 cron 任务，由 `start_all.py` 自动配置：
+项目有 7 个 cron 任务，由 `start_all.py` 自动配置：
 
 | 服务 | 频率 | 作用 |
 |:--|:--|:--|
@@ -401,6 +404,7 @@ python3 scripts/llm.py --test
 | `alert.py --brief` | 每30分钟（工作日） | 发送持仓组合量比简报 |
 | `longbridge_sync.py` | 每30分钟（工作日） | 同步长桥持仓+自选股 |
 | `cleanup.py` | 每小时 | 清理过期数据（各市场收盘后 1 小时触发） |
+| `backfill_signals.py` | 每天 17:00（工作日） | 回填信号触发后 T+1/T+3/T+5 收益 |
 
 `longbridge_sync.py` 只有在 watchlist 实际变化时才会写入 `config.yaml` 并重启 WebSocket；如果长桥接口失败，或返回空列表但本地已有监控标的，会中止同步并保留现有配置，避免误清空 watchlist。
 
@@ -472,10 +476,10 @@ JSONL 是可回放原始数据。实时量比计算优先读取 SQLite 的 `quot
 - `volume_ratios` — 量比实时记录（带 ticker + timestamp 索引）
 - `quote_snapshots` — WebSocket/REST 原始行情快照，字段对齐 `ticker/timestamp/price/open/high/low/volume/turnover/change/change_pct`
 - `quote_minute_bars` — 每 ticker 每市场分钟一行的累计量快照，是 5日历史同期量比和日内滚动量比的主计算数据源
-- `signals` — 信号记录（带 timestamp 索引）
+- `signals` — 信号记录（含 market、exit_price_1d/3d/5d、return_1d/3d/5d 胜率回填字段）
 - `signal_states` — 信号去重状态
 - `llm_calls` — LLM API 调用记录
-- `schema_meta` — 数据库 schema 版本。v3 起在 v2 基础上无损增加 `quote_minute_bars`，避免 `alert.py` 每分钟全量解析 JSONL。
+- `schema_meta` — 数据库 schema 版本。v3 新增 `quote_minute_bars` 分钟聚合表；v4 为 signals 表新增胜率回填字段。
 
 `volume_ratios` 当前记录两套算法结果：
 
@@ -500,7 +504,7 @@ DROP TABLE IF EXISTS signal_states
 - quote_snapshots：20 天
 - quote_minute_bars：20 天
 - volume_ratios：20 天
-- signals：20 天
+- signals：90 天（胜率分析需要更长保留期）
 - llm_calls：90 天
 
 同时有容量兜底：
@@ -595,10 +599,10 @@ logs/
 [project]
 requires-python = ">=3.11"
 dependencies = [
-    "pyyaml",
-    "requests",
-    "longbridge>=2.0.0",
-    "lark-oapi>=1.0.0",
+    "pyyaml>=6.0,<7.0",
+    "requests>=2.31.0,<3.0",
+    "longbridge>=2.0.0,<3.0",
+    "lark-oapi>=1.0.0,<2.0",
 ]
 ```
 
@@ -619,6 +623,7 @@ dependencies = [
 | v3.6 | 2026-05-01 | 稳定性优化：快照 3GB/数据库 1GB 容量兜底、Longbridge SDK 安全静音、同步失败保护、无变化不重启 WebSocket、状态展示容量上限 |
 | v3.7 | 2026-05-01 | 并发与运行时加固：配置原子写入、alert 锁外执行 LLM/飞书推送、飞书 `/start` `/stop` 后台执行、compute 缓存上限、WebSocket 优雅退出补写队列 |
 | v3.8 | 2026-05-07 | 全盘代码审查修复 27 项（SQLite 错误处理/BaseException/缓存上限/竞态/fd 泄漏/PID 生命周期等）；飞书消息 10 项产品优化（简报标题"有关注"/LLM 分析提权/价格符号按市场/5日+日内双趋势对比/状态卡片层级/信号方向标识/触发来源标注/静默到期通知/LLM prompt 加日内量比/告警合并为单张卡片）；尾盘信号检测扩展至港股和美股 |
+| v3.9 | 2026-05-07 | 信号胜率追踪系统：schema v4 新增 signals 胜率回填字段、backfill_signals.py 自动回填 T+1/T+3/T+5 收益、get_signal_stats() 按类型/标的统计胜率；代码审查二轮修复：locked_pid 提取 core/utils.py、缓存 TTL 4小时过期、市场时间配置化、monkey-patch SDK 容错、/sync 异步化、init_db 拆分、mute 副本修复 |
 
 ---
 

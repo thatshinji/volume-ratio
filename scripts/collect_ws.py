@@ -67,9 +67,7 @@ def fetch_prev_close(tickers: list):
             for q in quotes:
                 _prev_close_cache[q.symbol] = float(q.prev_close or 0)
         print(f"[ws] prev_close 缓存完成: {len(_prev_close_cache)} 个标的", flush=True)
-    except BaseException as e:
-        if isinstance(e, (KeyboardInterrupt, SystemExit)):
-            raise
+    except Exception as e:
         print(f"[ws] prev_close 缓存失败: {e}", flush=True)
 
 
@@ -269,13 +267,6 @@ def run_websocket():
 
         except Exception as e:
             print(f"[ws] 未知异常: {e}", flush=True)
-            traceback.print_exc()
-            return
-
-        except BaseException as e:
-            if isinstance(e, (KeyboardInterrupt, SystemExit)):
-                raise
-            print(f"[ws] Longbridge SDK 异常: {e}", flush=True)
             traceback.print_exc()
             return
 

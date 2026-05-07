@@ -3,18 +3,20 @@
 所有脚本通过 `from core.market import get_market, get_all_tickers` 使用
 """
 
+import time
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 
-from .config import parse_ticker
+from .config import parse_ticker, MARKET_SESSIONS
 from .silence import suppress_stdout
 
 # 交易日缓存: {market: (date_fetched, trading_days_set)}
 _trading_days_cache = {}
-# 指定区间交易日缓存: {(market, start, end): trading_days_set}
+# 指定区间交易日缓存: {(market, start, end): (fetched_ts, trading_days_set)}
 _trading_days_range_cache = {}
 _TRADING_DAYS_CACHE_MAX = 64
-# 交易日查找缓存: {market: (start, end, trading_days_set)}
+_CACHE_TTL_SECONDS = 4 * 3600
+# 交易日查找缓存: {market: (fetched_ts, start, end, trading_days_set)}
 _trading_days_lookup_cache = {}
 
 MARKET_TZ = {
@@ -31,8 +33,9 @@ def market_now(market: str) -> datetime:
 def _fetch_trading_days(market: str, start: date, end: date) -> set:
     """查询指定日期区间内的交易日集合。"""
     cache_key = (market, start, end)
-    if cache_key in _trading_days_range_cache:
-        return _trading_days_range_cache[cache_key]
+    cached = _trading_days_range_cache.get(cache_key)
+    if cached and (time.monotonic() - cached[0]) < _CACHE_TTL_SECONDS:
+        return cached[1]
     try:
         import os
         from longbridge.openapi import OAuthBuilder, Config, QuoteContext, Market
@@ -58,7 +61,7 @@ def _fetch_trading_days(market: str, start: date, end: date) -> set:
             days = {raw_days}
         else:
             days = set(raw_days or [])
-        _trading_days_range_cache[cache_key] = days
+        _trading_days_range_cache[cache_key] = (time.monotonic(), days)
         while len(_trading_days_range_cache) > _TRADING_DAYS_CACHE_MAX:
             _trading_days_range_cache.pop(next(iter(_trading_days_range_cache)))
         return days
@@ -78,6 +81,8 @@ def _check_trading_days(market: str) -> set:
     start = end - timedelta(days=10)
     days = _fetch_trading_days(market, start, end)
     _trading_days_cache[market] = (today, days)
+    while len(_trading_days_cache) > _TRADING_DAYS_CACHE_MAX:
+        _trading_days_cache.pop(next(iter(_trading_days_cache)))
     return days
 
 
@@ -97,8 +102,8 @@ def is_trading_day_on(market: str, target_date: date) -> bool:
     """
     cached = _trading_days_lookup_cache.get(market)
     if cached:
-        start, end, cached_days = cached
-        if start <= target_date <= end:
+        fetched_ts, start, end, cached_days = cached
+        if (time.monotonic() - fetched_ts) < _CACHE_TTL_SECONDS and start <= target_date <= end:
             if not cached_days:
                 return True
             return target_date in cached_days
@@ -106,7 +111,7 @@ def is_trading_day_on(market: str, target_date: date) -> bool:
     start = target_date - timedelta(days=30)
     end = target_date + timedelta(days=5)
     trading_days = _fetch_trading_days(market, start, end)
-    _trading_days_lookup_cache[market] = (start, end, trading_days)
+    _trading_days_lookup_cache[market] = (time.monotonic(), start, end, trading_days)
     while len(_trading_days_lookup_cache) > _TRADING_DAYS_CACHE_MAX:
         _trading_days_lookup_cache.pop(next(iter(_trading_days_lookup_cache)))
     if not trading_days:
@@ -127,21 +132,11 @@ def is_market_trading(market: str) -> bool:
     if not _is_trading_day(market):
         return False
 
-    if market == "CN":
-        # A股: 9:30-11:30, 13:00-15:00 (北京时间)
-        t = now.hour * 100 + now.minute
-        return (930 <= t <= 1130) or (1300 <= t <= 1500)
-
-    elif market == "HK":
-        # 港股: 9:30-12:00, 13:00-16:00 (香港时间，同北京时间)
-        t = now.hour * 100 + now.minute
-        return (930 <= t <= 1200) or (1300 <= t <= 1600)
-
-    elif market == "US":
-        # 美股: 9:30-16:00 ET，使用市场本地日期和时间判断。
-        t = now.hour * 100 + now.minute
-        return 930 <= t <= 1600
-
+    sessions = MARKET_SESSIONS.get(market, [])
+    t = now.hour * 60 + now.minute
+    for sh, sm, eh, em in sessions:
+        if sh * 60 + sm <= t <= eh * 60 + em:
+            return True
     return False
 
 
