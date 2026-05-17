@@ -1128,7 +1128,12 @@ def main():
         try:
             msg = data.event.message
             chat_id = msg.chat_id
+            chat_type = getattr(msg, "chat_type", "p2p")
             msg_type = msg.message_type
+
+            # 群聊消息交给 Hermes 处理
+            if chat_type == "group":
+                return
 
             if msg_type == "text":
                 content = json.loads(msg.content)

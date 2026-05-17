@@ -11,6 +11,14 @@
 | 量比机器人（已有） | /start /stop /status /scan /signals /add /remove 等监控指令 |
 | Hermes 机器人（新增） | 交易分析、行情查询、策略讨论、自由对话 |
 
+**重要**：修改 `feishu_bot.py`，让量比机器人只处理私聊消息，群里消息交给 Hermes：
+
+```python
+# feishu_bot.py handle_p2_im_message_receive_v1() 中添加：
+if chat_type == "group":
+    return  # 群聊消息交给 Hermes 处理
+```
+
 两者互不干扰，可在同一个飞书群里共存。
 
 ---
@@ -103,79 +111,79 @@ hermes profile create volume-ratio
 
 ## 步骤三：配置飞书 Gateway
 
-编辑 profile 的配置文件：
+编辑 profile 的 `.env` 文件：
 
 ```bash
-hermes config edit --profile volume-ratio
+nano ~/.hermes/profiles/volume-ratio/.env
 ```
 
-添加飞书平台配置：
+添加以下配置：
 
-```yaml
-gateway:
-  platforms:
-    feishu:
-      enabled: true
-      app_id: "cli_xxxxxxxxxxxxxxx"          # 替换为步骤一获取的 App ID
-      app_secret: "xxxxxxxxxxxxxxxxxxxxxxx"   # 替换为步骤一获取的 App Secret
-      # 可选：默认发送到的群 chat_id
-      # 可以从群链接或飞书 API 获取
-      home_chat_id: "oc_xxxxxxxxxxxxxxxx"
+```env
+# Feishu Integration
+FEISHU_APP_ID=cli_xxxxxxxxxxxxxxx      # 替换为你的 App ID
+FEISHU_APP_SECRET=xxxxxxxxxxxxxxxx      # 替换为你的 App Secret
+FEISHU_CONNECTION_MODE=websocket
+FEISHU_DOMAIN=feishu
+FEISHU_ALLOW_ALL_USERS=true
+FEISHU_REQUIRE_MENTION=false
+FEISHU_GROUP_POLICY=open
+FEISHU_HOME_CHANNEL=oc_xxxxxxxxxxxxxxxx # 你的群 chat_id
 
-  # 可选：同时启动 API Server，供量比系统调用
-  # api_server:
-  #   enabled: true
-  #   port: 9090
+# Model
+MINIMAX_API_KEY=sk-xxxxxxxxxxxxxxxx
 ```
+
+**关键配置说明：**
+- `FEISHU_GROUP_POLICY=open` — 允许机器人响应所有群聊消息（不设置则默认仅响应白名单群）
+- `FEISHU_REQUIRE_MENTION=false` — 群聊中不需要 @ 机器人即可响应
+- `FEISHU_HOME_CHANNEL` — cron 结果和跨平台消息会发送到该群
 
 ---
 
 ## 步骤四：配置模型
 
-推荐使用与量比系统相同的模型（MiniMax 或小米）：
+编辑 profile 的 `config.yaml`：
 
 ```bash
-hermes model --profile volume-ratio
+nano ~/.hermes/profiles/volume-ratio/config.yaml
 ```
 
-选择 MiniMax 或小米模型，按提示配置 API Key。
+添加模型和辅助功能配置：
+
+```yaml
+model:
+  provider: minimax
+  default: MiniMax-M2.7
+  base_url: https://api.minimaxi.com/anthropic
+auxiliary:
+  title_generation:
+    provider: minimax
+    model: MiniMax-M2.7
+    base_url: https://api.minimaxi.com/anthropic
+    api_key: sk-xxxxxxxxxxxxxxxx
+```
 
 ---
 
-## 步骤五：安装必要 Skills
+## 步骤五：启动 Gateway
 
 ```bash
-# 以 volume-ratio profile 启动时加载投资相关技能
-hermes skills install trading-plan-parallel
-hermes skills install longbridge
-hermes skills install futuapi
-```
-
-这些 skill 会按需加载到对话中，Hermes 可以直接调用它们分析股票。
-
----
-
-## 步骤六：启动 Gateway
-
-```bash
-hermes gateway run --profile volume-ratio
-```
-
-首次启动后验证：
-1. 在飞书向 Hermes 机器人发消息
-2. 应收到回复
-
-若需后台运行：
-
-```bash
-hermes gateway install --profile volume-ratio
-hermes gateway start --profile volume-ratio
+hermes --profile volume-ratio gateway install
+hermes --profile volume-ratio gateway start
 ```
 
 查看状态：
 
 ```bash
-hermes gateway status --profile volume-ratio
+hermes --profile volume-ratio gateway status
+hermes --profile volume-ratio gateway restart  # 重启
+```
+
+查看日志：
+
+```bash
+tail -f ~/.hermes/profiles/volume-ratio/logs/gateway.log
 ```
 
 ---
@@ -229,7 +237,7 @@ hermes gateway stop --profile volume-ratio
 
 ## 与量比系统的联动（可选增强）
 
-如果想让两个机器人互相感知（例如量比检测到信号后，让 Hermes 分析），可以在 `feishu_bot.py` 中增加配置：
+如果想让两个机器人互相感知（例如量比检测到信号后，让 Hermes 分析），可以在 `config.yaml` 中增加配置：
 
 ```yaml
 # config.yaml
