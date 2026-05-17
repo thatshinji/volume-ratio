@@ -10,6 +10,7 @@ Usage:
 
 import json
 import os
+import re
 import signal
 import sqlite3
 import subprocess
@@ -28,6 +29,11 @@ DB_MAX_BYTES = 1 * GIB
 
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import *
+
+# 对话上下文：{chat_id: [(role, text, timestamp), ...]}
+_conversation_context: dict = {}
+_CONTEXT_MAX_TURNS = 10
+_CONTEXT_TTL_SECONDS = 300  # 5 分钟无对话则清空
 from lark_oapi.ws import Client as WsClient
 from lark_oapi.ws.enum import MessageType
 from lark_oapi.core.json import JSON
@@ -146,6 +152,16 @@ def send_text(client: lark.Client, chat_id: str, text: str):
         print(f"[bot] 文本发送成功 -> {chat_id}", flush=True)
     else:
         print(f"[bot] 文本发送失败: code={resp.code} msg={resp.msg}", flush=True)
+
+
+def send_markdown(client: lark.Client, chat_id: str, title: str, content_md: str):
+    """发送富文本消息（markdown 格式）"""
+    card = {
+        "config": {"wide_screen_mode": True},
+        "header": {"title": {"tag": "plain_text", "content": title}},
+        "elements": [{"tag": "markdown", "content": content_md}]
+    }
+    send_card(client, chat_id, card)
 
 
 def send_card(client: lark.Client, chat_id: str, card: dict):
@@ -977,6 +993,127 @@ def run_service_command_async(
     thread.start()
 
 
+def _is_command(text: str) -> bool:
+    """判断消息是否为系统指令"""
+    commands = {"/start", "/stop", "/status", "/scan", "/signals",
+                "/brief", "/add", "/remove", "/mute", "/history",
+                "/sync", "/watchlist", "/allstock", "/help"}
+    return text in commands or any(text.startswith(cmd + " ") for cmd in commands)
+
+
+def _extract_tickers(text: str) -> list:
+    """从文本中提取股票代码，如 CLF.US、1164.HK"""
+    return re.findall(r'\b([A-Z]{2,6})\.(US|HK|SH|SZ)\b', text.upper())
+
+
+def _sanitize_markdown_for_feishu(text: str) -> str:
+    """将 LLM 返回的 markdown 转为飞书卡片兼容格式（表格→列表，移除不支持标签）"""
+    lines = text.split("\n")
+    result = []
+    in_table = False
+    for line in lines:
+        if re.match(r'\|.*\|', line) and re.search(r'\|.*\|', line):
+            # 表头分隔行（如 |---|---|）→ 跳过
+            if re.match(r'\|[\s\-:|]+\|', line):
+                in_table = True
+                continue
+            # 数据行：| col1 | col2 | → 提取非空内容
+            if in_table:
+                cells = [c.strip() for c in line.split("|")[1:-1]]
+                if cells:
+                    # 转为 "• 指标: 数值" 格式
+                    row_text = "  •  " + "  |  ".join(cells)
+                    result.append(row_text)
+                continue
+        else:
+            in_table = False
+            result.append(line)
+    return "\n".join(result)
+
+
+def _build_bot_system_prompt() -> str:
+    """构建机器人系统提示词"""
+    return (
+        "你是量比监控系统的 AI 助手，**必须使用 markdown 格式回复**。\n"
+        "用户可以问你关于以下内容的问题：\n"
+        "- 各标的价格、量比、趋势\n"
+        "- 持仓情况、监控状态\n"
+        "- 信号含义，分析建议\n"
+        "- 系统操作（如添加、删除标的）\n\n"
+        "回复格式示例：\n"
+        "## 分析结论\n"
+        "**CLF.US** 当前量比为 2.3，信号为买入。\n"
+        "- 趋势：上升\n"
+        "- 风险：中等\n\n"
+        "**注意**：飞书卡片不支持 markdown 表格，请用列表代替。例如：\n"
+        "  •  价格: $10.31\n"
+        "  •  量比: 2.39\n"
+        "不要使用 | 表格语法。\n\n"
+        "如果用户的问题涉及具体行情数据，优先根据你已知的上下文回答，"
+        "或建议用户使用 /scan 或 /brief 命令查询最新数据。回答要简洁，专业。"
+    )
+
+
+def handle_natural_language(client: lark.Client, chat_id: str, text: str):
+    """对非指令消息走 LLM 对话"""
+    from llm import call_llm
+
+    context = _conversation_context.get(chat_id, [])
+    now = time.monotonic()
+
+    # 清理过期上下文
+    if context and (now - context[0][2]) > _CONTEXT_TTL_SECONDS:
+        context = []
+
+    system_prompt = _build_bot_system_prompt()
+
+    # 构建对话历史
+    history_text = ""
+    for role, content, _ in context:
+        history_text += f"\n{role}: {content}"
+
+    # 如果用户提到股票代码，查询实时数据附加到 prompt
+    tickers = _extract_tickers(text)
+    extra_data = ""
+    if tickers:
+        for ticker_match in tickers[:3]:  # 最多查 3 个
+            ticker = f"{ticker_match[0]}.{ticker_match[1]}"
+            try:
+                from compute import compute_ticker
+                data = compute_ticker(ticker)
+                if data:
+                    extra_data += (
+                        f"\n{ticker} 当前数据："
+                        f"价格={data.get('price', 'N/A')}，"
+                        f"量比={data.get('ratio', 'N/A')}，"
+                        f"信号={data.get('signal', 'N/A')}，"
+                        f"涨跌={data.get('change_pct', 'N/A')}%"
+                    )
+            except Exception:
+                pass
+
+    full_prompt = (
+        f"{system_prompt}"
+        f"{history_text}"
+        f"\n\n用户: {text}"
+        f"{extra_data}"
+    )
+
+    print(f"[bot] LLM 对话: {text[:50]}...", flush=True)
+    response = call_llm(full_prompt)
+    if not response:
+        response = "抱歉，暂时无法处理你的请求。"
+
+    # 更新上下文
+    context.append(("user", text, now))
+    context.append(("assistant", response, now))
+    if len(context) > _CONTEXT_MAX_TURNS:
+        context = context[-_CONTEXT_MAX_TURNS:]
+    _conversation_context[chat_id] = context
+
+    send_markdown(client, chat_id, "🤖 AI 助手", _sanitize_markdown_for_feishu(response))
+
+
 def handle_command(client: lark.Client, chat_id: str, text: str):
     """处理用户指令（调用方已 strip）"""
     print(f"[bot] 收到指令: {text}", flush=True)
@@ -1146,7 +1283,10 @@ def main():
                     print(f"[bot] 忽略重复消息: {text} ({dedupe_key})", flush=True)
                     return
                 print(f"[bot] 收到消息: {text}", flush=True)
-                handle_command(api_client, chat_id, text)
+                if _is_command(text):
+                    handle_command(api_client, chat_id, text)
+                else:
+                    handle_natural_language(api_client, chat_id, text)
         except Exception as e:
             print(f"[bot] 消息处理异常: {e}", flush=True)
 
