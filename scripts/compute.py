@@ -768,6 +768,7 @@ def _create_tables(conn: sqlite3.Connection):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_volume_ratios_ticker ON volume_ratios(ticker)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_volume_ratios_timestamp ON volume_ratios(timestamp)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_type_time ON signals(signal_type, timestamp)")
 
 
 def _migrate_schema(conn: sqlite3.Connection, current_version: int):
@@ -804,6 +805,8 @@ def init_db():
 
     db_path = get_db_path()
     with sqlite3.connect(db_path, timeout=30) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
         current_version = _get_schema_version(conn)
         _migrate_schema(conn, current_version)
         _create_tables(conn)

@@ -126,6 +126,7 @@ def cleanup_database(table: str, keep_days: int):
             cursor = conn.execute(f"DELETE FROM {table} WHERE {timestamp_column} < ?", (cutoff,))
             if cursor.rowcount > 0:
                 print(f"[cleanup] {table}: 删除 {cursor.rowcount} 条过期记录")
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     except sqlite3.OperationalError as e:
         print(f"[cleanup] {table} 清理失败: {e}")
 
@@ -147,15 +148,36 @@ def cleanup_optional_database_table(table: str, keep_days: int, timestamp_column
             cursor = conn.execute(f"DELETE FROM {table} WHERE {timestamp_column} < ?", (cutoff,))
             if cursor.rowcount > 0:
                 print(f"[cleanup] {table}: 删除 {cursor.rowcount} 条过期记录")
+            # 轻量 checkpoint：删除后截断 WAL 文件，归还磁盘空间（比 VACUUM 快很多）
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     except sqlite3.OperationalError as e:
         print(f"[cleanup] {table} 清理失败: {e}")
 
 
-def cleanup_snapshot_size_limit(dry_run: bool = False):
-    """快照目录容量兜底：超过 3GB 时删除最旧快照到 2.7GB 以下。"""
-    if not SNAPSHOT_DIR.exists():
-        return
+def cleanup_wal_files():
+    """清理已 checkpoint 的 WAL 文件"""
+    for suffix in ("-wal", "-shm"):
+        f = DB_PATH.with_suffix(DB_PATH.suffix + suffix)
+        if f.exists():
+            try:
+                size = f.stat().st_size
+                f.unlink()
+                print(f"[cleanup] 删除 WAL 文件 {f.name} ({format_size(size)})")
+            except OSError:
+                pass
 
+
+_snapshot_scan_cache = None  # (files, total_bytes) 缓存，避免同一次运行中重复扫描
+
+
+def _scan_snapshot_files():
+    """扫描快照目录，返回 (files list, total_bytes)。一次遍历供多处复用。"""
+    global _snapshot_scan_cache
+    if _snapshot_scan_cache is not None:
+        return _snapshot_scan_cache
+    if not SNAPSHOT_DIR.exists():
+        _snapshot_scan_cache = ([], 0)
+        return _snapshot_scan_cache
     files = []
     total = 0
     for f in SNAPSHOT_DIR.rglob("*"):
@@ -166,6 +188,13 @@ def cleanup_snapshot_size_limit(dry_run: bool = False):
             files.append(f)
         except OSError:
             continue
+    _snapshot_scan_cache = (files, total)
+    return files, total
+
+
+def cleanup_snapshot_size_limit(dry_run: bool = False):
+    """快照目录容量兜底：超过 3GB 时删除最旧快照到 2.7GB 以下。"""
+    files, total = _scan_snapshot_files()
     if total <= SNAPSHOT_MAX_BYTES:
         return
 
@@ -208,7 +237,9 @@ def vacuum_database():
     before = DB_PATH.stat().st_size
     try:
         with sqlite3.connect(DB_PATH, timeout=60) as conn:
+            conn.execute("PRAGMA journal_mode=DELETE")
             conn.execute("VACUUM")
+            conn.execute("PRAGMA journal_mode=WAL")
     except sqlite3.OperationalError as e:
         print(f"[cleanup] VACUUM 失败: {e}")
         return
@@ -309,10 +340,7 @@ def get_disk_usage() -> dict:
     """获取数据目录磁盘占用"""
     result = {"snapshots": 0, "database": 0, "total": 0}
 
-    if SNAPSHOT_DIR.exists():
-        for f in SNAPSHOT_DIR.rglob("*"):
-            if f.is_file():
-                result["snapshots"] += f.stat().st_size
+    _, result["snapshots"] = _scan_snapshot_files()
 
     if DB_PATH.exists():
         result["database"] = DB_PATH.stat().st_size
@@ -364,6 +392,9 @@ def main():
         cleanup_database("volume_ratios", RATIO_KEEP_DAYS)
         cleanup_database("signals", SIGNAL_KEEP_DAYS)
         cleanup_optional_database_table("llm_calls", LLM_KEEP_DAYS)
+
+    # WAL 文件清理（VACUUM 后主动 checkpoint，释放 -wal/-shm）
+    cleanup_wal_files()
 
     # 容量兜底不依赖市场收盘状态。
     cleanup_snapshot_size_limit(args.dry_run)
