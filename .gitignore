@@ -22,5 +22,8 @@ data/snapshots/
 # Node
 node_modules/
 
+# Claude Code
+.claude/
+
 # OS
 .DS_Store
