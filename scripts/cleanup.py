@@ -38,6 +38,9 @@ SNAPSHOT_MAX_BYTES = 3 * GIB
 SNAPSHOT_TARGET_BYTES = int(SNAPSHOT_MAX_BYTES * 0.9)
 DB_MAX_BYTES = 1 * GIB
 
+BACKUP_DIR = ROOT / "data" / "backups"
+BACKUP_KEEP_DAYS = 7
+
 
 def is_market_closed(market: str) -> bool:
     """动态判断市场是否已收盘（收盘后 1 小时开始清理）"""
@@ -248,6 +251,71 @@ def vacuum_database():
         print(f"[cleanup] 数据库 VACUUM: {format_size(before)} -> {format_size(after)}")
 
 
+def backup_database():
+    """每日备份数据库：WAL checkpoint 后复制一份，保留 7 份。"""
+    import shutil
+    import time
+
+    if not DB_PATH.exists():
+        return
+
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+
+    # WAL checkpoint 确保所有数据已落盘
+    try:
+        with sqlite3.connect(DB_PATH, timeout=30) as conn:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except sqlite3.OperationalError:
+        return
+
+    # 备份文件名：ratios_YYYYMMDD.db
+    today = datetime.now().strftime("%Y%m%d")
+    backup_path = BACKUP_DIR / f"ratios_{today}.db"
+
+    try:
+        shutil.copy2(DB_PATH, backup_path)
+        print(f"[cleanup] 数据库备份: {backup_path.name} ({format_size(backup_path.stat().st_size)})")
+    except OSError as e:
+        print(f"[cleanup] 数据库备份失败: {e}")
+        return
+
+    # 删除 7 天前的备份
+    cutoff = datetime.now() - timedelta(days=BACKUP_KEEP_DAYS)
+    for f in BACKUP_DIR.iterdir():
+        if not f.name.startswith("ratios_") or not f.name.endswith(".db"):
+            continue
+        try:
+            mtime = datetime.fromtimestamp(f.stat().st_mtime)
+            if mtime < cutoff:
+                f.unlink()
+                print(f"[cleanup] 删除过期备份: {f.name}")
+        except OSError:
+            continue
+
+
+_last_backup_date = None
+
+
+def run_daily_if_needed():
+    """每天只执行一次每日任务（checkpoint + 备份）。"""
+    global _last_backup_date
+    today = datetime.now().strftime("%Y%m%d")
+    if _last_backup_date == today:
+        return
+    _last_backup_date = today
+
+    # WAL checkpoint（截断 WAL 文件，归还磁盘空间）
+    try:
+        with sqlite3.connect(DB_PATH, timeout=30) as conn:
+            result = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            # result: (checkpointed_pages, WAL_pages, drywall_pages)
+            # 0,0 表示已完全 checkpoint
+    except sqlite3.OperationalError:
+        pass
+
+    backup_database()
+
+
 def cleanup_database_size_limit(dry_run: bool = False):
     """数据库容量兜底：超过 1GB 时清理旧数据并压缩。"""
     if not DB_PATH.exists():
@@ -355,6 +423,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="只显示将要清理的内容，不实际删除")
     parser.add_argument("--force", action="store_true", help="强制清理所有市场（忽略收盘检测）")
     parser.add_argument("--status", action="store_true", help="显示磁盘占用状态")
+    parser.add_argument("--backup", action="store_true", help="立即备份数据库（忽略每日一次限制）")
     args = parser.parse_args()
 
     if args.status:
@@ -372,7 +441,15 @@ def main():
                 print(f"  {market}: {jsonl_count} JSONL + {json_count} JSON")
         return
 
+    if args.backup:
+        print(f"[cleanup] 手动备份数据库 ({datetime.now().strftime('%Y-%m-%d %H:%M')})")
+        backup_database()
+        return
+
     print(f"[cleanup] 开始清理检查 ({datetime.now().strftime('%Y-%m-%d %H:%M')})")
+
+    # 每日任务：WAL checkpoint + 数据库备份（每天只执行一次）
+    run_daily_if_needed()
 
     for market in ["CN", "HK", "US"]:
         if not args.force and not is_market_closed(market):
