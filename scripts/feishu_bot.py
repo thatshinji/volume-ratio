@@ -27,15 +27,15 @@ SNAPSHOT_MAX_BYTES = 3 * GIB
 DB_MAX_BYTES = 1 * GIB
 
 import lark_oapi as lark
-from lark_oapi.api.im.v1 import *
+from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody, P2CardActionTriggerResponse
 from lark_oapi.ws import Client as WsClient
 from lark_oapi.ws.enum import MessageType
 from lark_oapi.core.json import JSON
 from lark_oapi.core.const import UTF_8
 
 from core.config import load_config, parse_ticker, remove_ticker_from_config, save_config
-from core.market import get_all_tickers_with_names, get_ticker_name, get_market
-from core.display import format_ratio_display, format_ticker_line, build_market_table, build_brief_elements, format_size
+from core.market import get_market
+from core.display import format_ratio_display, build_market_table, build_brief_elements, format_size
 from core.utils import locked_pid
 
 # 全局变量
@@ -169,7 +169,7 @@ def send_card(client: lark.Client, chat_id: str, card: dict):
 
 def build_status_card() -> dict:
     """构建系统状态卡片：服务 + 数据 + 市场 + 算法 + 推送健康。"""
-    from core.market import get_all_tickers, get_market, is_market_trading
+    from core.market import get_all_tickers, is_market_trading
 
     config = load_config()
     llm = config.get("llm", {})
@@ -887,7 +887,7 @@ def _check_component_status() -> dict:
     # Cron 任务
     try:
         result = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=10)
-        cron_lines = [l for l in result.stdout.split("\n") if "volume-ratio" in l]
+        cron_lines = [line for line in result.stdout.split("\n") if "volume-ratio" in line]
         if cron_lines:
             status["cron"] = ("✅", f"{len(cron_lines)} 个任务")
         else:

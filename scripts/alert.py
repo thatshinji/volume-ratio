@@ -20,8 +20,7 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from core.config import load_config, MARKET_END_OF_DAY
-from core.market import get_ticker_name
-from core.display import format_ratio_display, format_ticker_line, get_currency_symbol
+from core.display import format_ratio_display, get_currency_symbol
 
 
 # === 信号规则 ===
@@ -349,7 +348,7 @@ def send_feishu_card(card: dict, chat_id: str = "") -> bool:
 
         resp = client.im.v1.message.create(req)
         if resp.success():
-            print(f"[alert] 飞书卡片推送成功")
+            print("[alert] 飞书卡片推送成功")
             return True
         else:
             print(f"[alert] 飞书卡片推送失败: code={resp.code} msg={resp.msg}")
@@ -495,7 +494,6 @@ def _build_batch_card(alerts_with_analysis: list) -> dict:
     for alert, analysis in alerts_with_analysis:
         ticker = alert.get("ticker", "")
         change = float(alert.get("change_pct") or 0)
-        direction = "↑" if change > 0 else ("↓" if change < 0 else "─")
         entry = {
             "ticker": ticker,
             "name": alert.get("name", ticker),
@@ -562,7 +560,7 @@ def _build_batch_card(alerts_with_analysis: list) -> dict:
 
 def _build_mute_expiry_card(expired_tickers: list) -> dict:
     """静默到期通知卡片"""
-    lines = [f"以下标的静默期已到期，恢复信号推送：", ""]
+    lines = ["以下标的静默期已到期，恢复信号推送：", ""]
     for ticker in expired_tickers:
         lines.append(f"  {ticker}")
     return {

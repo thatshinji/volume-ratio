@@ -5,7 +5,6 @@
 """
 
 import argparse
-import json
 import os
 import sqlite3
 import subprocess
@@ -22,7 +21,7 @@ DB_MAX_BYTES = 1 * GIB
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from core.config import load_config, parse_ticker, save_config
-from core.market import get_all_tickers, get_all_tickers_with_names, get_ticker_name
+from core.market import get_ticker_name
 from core.display import format_ratio_display, format_ticker_line, format_size
 from core.utils import locked_pid
 
@@ -133,7 +132,6 @@ def cmd_status():
         try:
             pid = int(pid_file.read_text().strip())
             os.kill(pid, 0)
-            ws_ok = True
             # 检查最近采集时间
             latest_time = _get_latest_snapshot_time()
             print(f"  WebSocket: ✅ PID {pid}, 最近采集 {latest_time}")
@@ -145,7 +143,7 @@ def cmd_status():
     # Cron 任务
     try:
         result = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=5)
-        cron_lines = [l for l in result.stdout.split("\n") if "volume-ratio" in l]
+        cron_lines = [line for line in result.stdout.split("\n") if "volume-ratio" in line]
         if cron_lines:
             print(f"  Cron 任务: ✅ {len(cron_lines)} 个活跃")
         else:
