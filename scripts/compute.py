@@ -52,6 +52,18 @@ _minute_bar_cache = {}
 _minute_bar_presence_cache = {}
 _last_ratio_write = {}
 _db_initialized = False
+_persistent_conn = None  # 持久数据库连接，用于高频写入场景（如 WebSocket 采集）
+
+
+def _get_persistent_conn():
+    """获取持久数据库连接，复用而非每次新建，解决 FD 泄漏问题。"""
+    global _persistent_conn
+    if _persistent_conn is None:
+        init_db()
+        _persistent_conn = sqlite3.connect(get_db_path(), timeout=30, check_same_thread=False)
+        _persistent_conn.execute("PRAGMA journal_mode=WAL")
+        _persistent_conn.execute("PRAGMA synchronous=NORMAL")
+    return _persistent_conn
 
 
 def _cache_put(cache: dict, key, value, max_items: int):
@@ -934,34 +946,33 @@ def save_quote_minute_bar(
 
 def save_quote_snapshot(ticker: str, data: dict, source: str = "websocket"):
     """按 WebSocket/REST 返回结构保存原始快照，并同步更新分钟聚合表。"""
-    init_db()
     market = get_market(ticker)
     ts = parse_timestamp(data.get("timestamp", ""))
     market_ts = _to_market_dt(ts, market) if ts else None
     try:
-        with sqlite3.connect(get_db_path(), timeout=30) as conn:
-            conn.execute("""
-                INSERT OR IGNORE INTO quote_snapshots
-                (ticker, market, timestamp, market_timestamp, market_date, price, open, high, low,
-                 volume, turnover, change, change_pct, source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                ticker,
-                market,
-                data.get("timestamp", ""),
-                market_ts.isoformat() if market_ts else "",
-                market_ts.date().isoformat() if market_ts else "",
-                float(data.get("price", 0) or 0),
-                float(data.get("open", 0) or 0),
-                float(data.get("high", 0) or 0),
-                float(data.get("low", 0) or 0),
-                float(data.get("volume", 0) or 0),
-                float(data.get("turnover", 0) or 0),
-                float(data.get("change", 0) or 0),
-                float(data.get("change_pct", 0) or 0),
-                source,
-            ))
-            save_quote_minute_bar(ticker, data, source=source, conn=conn)
+        conn = _get_persistent_conn()
+        conn.execute("""
+            INSERT OR IGNORE INTO quote_snapshots
+            (ticker, market, timestamp, market_timestamp, market_date, price, open, high, low,
+             volume, turnover, change, change_pct, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            ticker,
+            market,
+            data.get("timestamp", ""),
+            market_ts.isoformat() if market_ts else "",
+            market_ts.date().isoformat() if market_ts else "",
+            float(data.get("price", 0) or 0),
+            float(data.get("open", 0) or 0),
+            float(data.get("high", 0) or 0),
+            float(data.get("low", 0) or 0),
+            float(data.get("volume", 0) or 0),
+            float(data.get("turnover", 0) or 0),
+            float(data.get("change", 0) or 0),
+            float(data.get("change_pct", 0) or 0),
+            source,
+        ))
+        save_quote_minute_bar(ticker, data, source=source, conn=conn)
     except sqlite3.Error as e:
         print(f"[compute] save_quote_snapshot 失败 {ticker}: {e}", flush=True)
 
