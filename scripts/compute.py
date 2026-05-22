@@ -469,7 +469,7 @@ def _resolve_session_time(ticker: str, current_time: datetime = None) -> tuple:
         if records:
             market_dt, market_date, target_minute = records[0].market_ts, records[0].market_date, records[0].market_minutes
 
-    if not records and not is_trading_day_on(market, market_date):
+    if not records:
         records = _fallback_to_latest(ticker)
         if records:
             market_dt, market_date, target_minute = records[0].market_ts, records[0].market_date, records[0].market_minutes

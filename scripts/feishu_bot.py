@@ -27,7 +27,7 @@ SNAPSHOT_MAX_BYTES = 3 * GIB
 DB_MAX_BYTES = 1 * GIB
 
 import lark_oapi as lark
-from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody, P2CardActionTriggerResponse
+from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
 from lark_oapi.ws import Client as WsClient
 from lark_oapi.ws.enum import MessageType
 from lark_oapi.core.json import JSON
