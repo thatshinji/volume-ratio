@@ -42,6 +42,8 @@ _saved_count = 0
 _CACHE_CLEAN_INTERVAL = 1000  # 每处理 1000 条行情清理一次缓存
 _active_tickers = set()  # 最近有行情的 ticker 集合
 _instance_lock_file = None
+_start_time = time.time()  # 进程启动时间，用于 24 小时自动重启
+_MAX_RUN_SECONDS = 24 * 3600  # 24 小时自动退出重启
 
 
 def fetch_prev_close(tickers: list):
@@ -229,6 +231,11 @@ def run_websocket():
             # 连接成功，重置重试计数
             # 主线程负责写出回调放入队列的数据
             while running.is_set():
+                # 24 小时自动退出重启，防止 fd 泄漏累积
+                if time.time() - _start_time > _MAX_RUN_SECONDS:
+                    print(f"[ws] 已运行 24 小时，准备重启以释放资源", flush=True)
+                    running.clear()
+                    break
                 try:
                     symbol, data = quote_queue.get(timeout=1)
                     save_snapshot(symbol, data)
