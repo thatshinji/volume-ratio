@@ -627,6 +627,7 @@ dependencies = [
 | v3.10 | 2026-05-21 | 代码规范与清理：修复 f-string 占位符、移除无用变量和冗余导入，并重构飞书机器人通配符导入（wildcard import），消除潜在命名空间冲突隐患 |
 | v3.11 | 2026-05-22 | 修复 `_resolve_session_time` fallback 逻辑：移除 is_trading_day_on 检查，改为 records 为空时直接 fallback 到最新可用日期。另修复 lark-oapi 1.5.5→1.6.5 升级导致的 import 路径变化 |
 | v3.12 | 2026-05-22 | WebSocket 采集进程增加 24 小时自动退出重启机制，防止长时间运行导致文件描述符泄漏累积（Errno 24: Too many open files）；launcher 在进程退出后自动拉起新实例 |
+| v3.13 | 2026-05-22 | 修复 FD 泄漏：compute.py 新增 _get_persistent_conn() 持久连接，save_quote_snapshot 和 save_ratio 改用持久连接替代逐条新建连接，并在写入后 commit() 避免 database is locked；连接数从 74+ 稳定降至 2 个 |
 
 ---
 
