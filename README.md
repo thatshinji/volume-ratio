@@ -625,6 +625,7 @@ dependencies = [
 | v3.8 | 2026-05-07 | 全盘代码审查修复 27 项（SQLite 错误处理/BaseException/缓存上限/竞态/fd 泄漏/PID 生命周期等）；飞书消息 10 项产品优化（简报标题"有关注"/LLM 分析提权/价格符号按市场/5日+日内双趋势对比/状态卡片层级/信号方向标识/触发来源标注/静默到期通知/LLM prompt 加日内量比/告警合并为单张卡片）；尾盘信号检测扩展至港股和美股 |
 | v3.9 | 2026-05-07 | 信号胜率追踪系统：schema v4 新增 signals 胜率回填字段、backfill_signals.py 自动回填 T+1/T+3/T+5 收益、get_signal_stats() 按类型/标的统计胜率；代码审查二轮修复：locked_pid 提取 core/utils.py、缓存 TTL 4小时过期、市场时间配置化、monkey-patch SDK 容错、/sync 异步化、init_db 拆分、mute 副本修复 |
 | v3.10 | 2026-05-21 | 代码规范与清理：修复 f-string 占位符、移除无用变量和冗余导入，并重构飞书机器人通配符导入（wildcard import），消除潜在命名空间冲突隐患 |
+| v3.11 | 2026-05-22 | 修复 `_resolve_session_time` fallback 逻辑：当数据库只有上一交易日数据但当前日期无数据时（原数据只到 2026-05-20），原逻辑因 is_trading_day_on 返回 True 而跳过 fallback，导致 HK 股票量比显示为 0；移除 is_trading_day_on 检查，改为 records 为空时直接 fallback 到最新可用日期。另修复 lark-oapi 1.5.5→1.6.5 升级导致的 P2CardActionTriggerResponse import 路径变化 |
 
 ---
 
