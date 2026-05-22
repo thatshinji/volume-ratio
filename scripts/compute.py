@@ -973,6 +973,7 @@ def save_quote_snapshot(ticker: str, data: dict, source: str = "websocket"):
             source,
         ))
         save_quote_minute_bar(ticker, data, source=source, conn=conn)
+        conn.commit()
     except sqlite3.Error as e:
         print(f"[compute] save_quote_snapshot 失败 {ticker}: {e}", flush=True)
 
@@ -985,40 +986,40 @@ def save_ratio(result: dict):
     if last_write and (now - last_write).total_seconds() < RATIO_WRITE_INTERVAL:
         return
 
-    init_db()
     try:
-        with sqlite3.connect(get_db_path(), timeout=30) as conn:
-            conn.execute("""
-                INSERT INTO volume_ratios
-                (ticker, name, timestamp, market, market_timestamp, market_date, price, change_pct,
-                 historical_ratio, historical_today_volume, historical_avg_volume, historical_sample_days,
-                 historical_signal, intraday_ratio, intraday_window_volume, intraday_baseline_volume,
-                 intraday_baseline_samples, intraday_signal, cond_vol, cond_stop, cond_stable, data_quality)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                ticker,
-                result.get("name", ticker),
-                now.isoformat(),
-                result.get("market", ""),
-                result.get("market_time", ""),
-                result.get("market_date", ""),
-                result.get("price", 0),
-                result.get("change_pct", 0),
-                result.get("ratio", 0),
-                result.get("volume_today", 0),
-                result.get("volume_avg5", 0),
-                result.get("historical_sample_days", 0),
-                result.get("signal", ""),
-                result.get("ratio_intraday", 0),
-                result.get("intraday_window_volume", 0),
-                result.get("intraday_baseline_volume", 0),
-                result.get("intraday_baseline_samples", 0),
-                result.get("signal_intraday", ""),
-                int(bool(result.get("cond_vol", False))),
-                int(bool(result.get("cond_stop", False))),
-                int(bool(result.get("cond_stable", False))),
-                result.get("data_quality", ""),
-            ))
+        conn = _get_persistent_conn()
+        conn.execute("""
+            INSERT INTO volume_ratios
+            (ticker, name, timestamp, market, market_timestamp, market_date, price, change_pct,
+             historical_ratio, historical_today_volume, historical_avg_volume, historical_sample_days,
+             historical_signal, intraday_ratio, intraday_window_volume, intraday_baseline_volume,
+             intraday_baseline_samples, intraday_signal, cond_vol, cond_stop, cond_stable, data_quality)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            ticker,
+            result.get("name", ticker),
+            now.isoformat(),
+            result.get("market", ""),
+            result.get("market_time", ""),
+            result.get("market_date", ""),
+            result.get("price", 0),
+            result.get("change_pct", 0),
+            result.get("ratio", 0),
+            result.get("volume_today", 0),
+            result.get("volume_avg5", 0),
+            result.get("historical_sample_days", 0),
+            result.get("signal", ""),
+            result.get("ratio_intraday", 0),
+            result.get("intraday_window_volume", 0),
+            result.get("intraday_baseline_volume", 0),
+            result.get("intraday_baseline_samples", 0),
+            result.get("signal_intraday", ""),
+            int(bool(result.get("cond_vol", False))),
+            int(bool(result.get("cond_stop", False))),
+            int(bool(result.get("cond_stable", False))),
+            result.get("data_quality", ""),
+        ))
+        conn.commit()
         _last_ratio_write[ticker] = now
     except sqlite3.Error as e:
         print(f"[compute] save_ratio 失败 {ticker}: {e}", flush=True)
