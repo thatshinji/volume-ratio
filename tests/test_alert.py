@@ -2,7 +2,6 @@
 alert.py 核心逻辑单元测试。
 """
 import sys
-import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch, MagicMock

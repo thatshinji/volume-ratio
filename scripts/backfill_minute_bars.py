@@ -3,8 +3,8 @@
 
 import argparse
 import json
-import sqlite3
 import sys
+import duckdb
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
@@ -25,7 +25,7 @@ def snapshot_files(ticker: str) -> list[Path]:
     return sorted(market_dir.glob(f"{prefix}_*.jsonl"))
 
 
-def backfill_ticker(conn: sqlite3.Connection, ticker: str, batch_size: int) -> tuple[int, int]:
+def backfill_ticker(conn: duckdb.DuckDBPyConnection, ticker: str, batch_size: int) -> tuple[int, int]:
     files = snapshot_files(ticker)
     rows = 0
     bad_rows = 0
@@ -43,32 +43,29 @@ def backfill_ticker(conn: sqlite3.Connection, ticker: str, batch_size: int) -> t
                         continue
                     save_quote_minute_bar(ticker, data, source="jsonl_backfill", conn=conn)
                     rows += 1
-                    if rows % batch_size == 0:
-                        conn.commit()
         except OSError as e:
             print(f"[backfill] {ticker} 读取失败 {path.name}: {e}", flush=True)
-    conn.commit()
     return rows, bad_rows
 
 
 def main():
-    parser = argparse.ArgumentParser(description="从 JSONL 快照回填 SQLite 分钟聚合表")
+    parser = argparse.ArgumentParser(description="从 JSONL 快照回填 DuckDB 分钟聚合表")
     parser.add_argument("tickers", nargs="*", help="只回填指定 ticker；默认回填 config.yaml 中全部 ticker")
     parser.add_argument("--reset", action="store_true", help="回填前删除目标 ticker 的旧分钟聚合数据")
-    parser.add_argument("--batch-size", type=int, default=5000, help="每多少条 JSONL 提交一次事务")
+    parser.add_argument("--batch-size", type=int, default=5000, help="每多少条 JSONL 提交一次事务（已废弃，保留兼容性）")
     args = parser.parse_args()
 
     config = load_config()
     tickers = args.tickers or get_all_tickers(config)
     init_db()
 
-    with sqlite3.connect(get_db_path(), timeout=60) as conn:
+    conn = duckdb.connect(str(get_db_path()))
+    try:
         if args.reset:
             for ticker in tickers:
                 deleted = conn.execute("DELETE FROM quote_minute_bars WHERE ticker = ?", (ticker,)).rowcount
                 if deleted:
                     print(f"[backfill] {ticker} 删除旧分钟聚合 {deleted} 行", flush=True)
-            conn.commit()
 
         total_rows = 0
         total_bad = 0
@@ -81,6 +78,8 @@ def main():
                 (ticker,),
             ).fetchone()[0]
             print(f"[backfill] {ticker}: 读取 {rows} 行 JSONL，分钟聚合 {minutes} 行", flush=True)
+    finally:
+        conn.close()
 
     print(f"[backfill] 完成：读取 {total_rows} 行，坏行 {total_bad} 行", flush=True)
 

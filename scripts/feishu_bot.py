@@ -11,7 +11,7 @@ Usage:
 import json
 import os
 import signal
-import sqlite3
+import duckdb
 import subprocess
 import sys
 import threading
@@ -173,7 +173,7 @@ def build_status_card() -> dict:
 
     config = load_config()
     llm = config.get("llm", {})
-    db_path = ROOT / "data" / "ratios.db"
+    db_path = ROOT / "data" / "ratios.duckdb"
     tickers = get_all_tickers(config)
     now = datetime.now()
 
@@ -195,7 +195,8 @@ def build_status_card() -> dict:
 
     if db_path.exists():
         try:
-            with sqlite3.connect(db_path, timeout=5) as conn:
+            conn = duckdb.connect(str(db_path))
+            try:
                 row = conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
                 schema_version = row[0] if row else "legacy"
                 ratio_count = conn.execute("SELECT COUNT(*) FROM volume_ratios").fetchone()[0]
@@ -229,7 +230,9 @@ def build_status_card() -> dict:
                         algo["intraday_ready"] += 1
                     if ts and (algo["latest_calc"] is None or ts > algo["latest_calc"][1]):
                         algo["latest_calc"] = (ticker, ts, hist_ratio or 0, intraday_ratio or 0)
-        except sqlite3.Error:
+            finally:
+                conn.close()
+        except Exception:
             schema_version = "读取失败"
 
     snapshot_summary = _get_snapshot_summary(tickers)
@@ -389,9 +392,9 @@ def build_scan_card() -> dict:
 
 def build_signals_card() -> dict:
     """构建今日信号卡片"""
-    import sqlite3
+    import duckdb
 
-    db_path = ROOT / "data" / "ratios.db"
+    db_path = ROOT / "data" / "ratios.duckdb"
     today = datetime.now().strftime("%Y-%m-%d")
 
     if not db_path.exists():
@@ -402,12 +405,15 @@ def build_signals_card() -> dict:
         }
 
     try:
-        with sqlite3.connect(db_path, timeout=10) as conn:
+        conn = duckdb.connect(str(db_path))
+        try:
             rows = conn.execute("""
                 SELECT ticker, name, signal_type, ratio, price, change_pct, source, timestamp
                 FROM signals WHERE timestamp LIKE ? ORDER BY timestamp
             """, (f"{today}%",)).fetchall()
-    except sqlite3.Error:
+        finally:
+            conn.close()
+    except Exception:
         rows = []
 
     if not rows:
@@ -850,7 +856,7 @@ def handle_card_action(data) -> "P2CardActionTriggerResponse":
 
 def _check_component_status() -> dict:
     """检查各组件运行状态"""
-    import sqlite3
+    import duckdb
 
     status = {}
 
@@ -896,13 +902,16 @@ def _check_component_status() -> dict:
         status["cron"] = ("⚠️", "检查失败")
 
     # 数据库
-    db_path = ROOT / "data" / "ratios.db"
+    db_path = ROOT / "data" / "ratios.duckdb"
     if db_path.exists():
         try:
-            with sqlite3.connect(str(db_path), timeout=5) as conn:
+            conn = duckdb.connect(str(db_path))
+            try:
                 count = conn.execute("SELECT COUNT(*) FROM volume_ratios").fetchone()[0]
                 status["db"] = ("✅", f"{count:,} 条记录")
-        except sqlite3.Error:
+            finally:
+                conn.close()
+        except Exception:
             status["db"] = ("⚠️", "读取失败")
     else:
         status["db"] = ("❌", "数据库不存在")

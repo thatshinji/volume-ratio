@@ -10,9 +10,8 @@ __pycache__/
 .venv/
 
 # Data
-data/ratios.db
-data/ratios.db-wal
-data/ratios.db-shm
+data/ratios.duckdb
+data/ratios.duckdb.wal
 data/snapshots/
 
 # IDE

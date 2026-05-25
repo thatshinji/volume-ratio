@@ -9,7 +9,7 @@ Usage:
 """
 
 import argparse
-import sqlite3
+import duckdb
 import sys
 from datetime import datetime, date, timedelta
 from pathlib import Path
@@ -17,7 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-DB_PATH = ROOT / "data" / "ratios.db"
+DB_PATH = ROOT / "data" / "ratios.duckdb"
 
 from core.market import get_market, is_trading_day_on
 
@@ -36,14 +36,17 @@ def get_nth_trading_day(market: str, from_date: date, n: int) -> date:
 def get_close_price(ticker: str, market_date: str) -> float:
     """从 quote_minute_bars 获取指定交易日的收盘价（最后一根分钟 bar 的 close）。"""
     try:
-        with sqlite3.connect(DB_PATH, timeout=10) as conn:
+        conn = duckdb.connect(str(DB_PATH))
+        try:
             row = conn.execute("""
                 SELECT close FROM quote_minute_bars
                 WHERE ticker = ? AND market_date = ?
                 ORDER BY market_minute DESC LIMIT 1
             """, (ticker, market_date)).fetchone()
             return row[0] if row and row[0] and row[0] > 0 else 0
-    except sqlite3.Error:
+        finally:
+            conn.close()
+    except Exception:
         return 0
 
 
@@ -53,7 +56,8 @@ def backfill_signal_results(dry_run: bool = False):
         print("[backfill] 数据库不存在")
         return
 
-    with sqlite3.connect(DB_PATH, timeout=30) as conn:
+    conn = duckdb.connect(str(DB_PATH))
+    try:
         # 查找需要回填的信号：return_5d 为 NULL，且信号时间足够久（至少 5 个交易日前）
         rows = conn.execute("""
             SELECT id, ticker, timestamp, price, market
@@ -61,6 +65,8 @@ def backfill_signal_results(dry_run: bool = False):
             WHERE return_5d IS NULL
             ORDER BY timestamp
         """).fetchall()
+    finally:
+        conn.close()
 
     if not rows:
         print("[backfill] 无待回填信号")
@@ -131,7 +137,8 @@ def backfill_signal_results(dry_run: bool = False):
             continue
 
         try:
-            with sqlite3.connect(DB_PATH, timeout=30) as conn:
+            conn = duckdb.connect(str(DB_PATH))
+            try:
                 conn.execute("""
                     UPDATE signals SET
                         market = ?,
@@ -140,8 +147,10 @@ def backfill_signal_results(dry_run: bool = False):
                     WHERE id = ?
                 """, (market, p1, p3 if p3 > 0 else None, p5 if p5 > 0 else None,
                       r1, r3, r5, signal_id))
+            finally:
+                conn.close()
             updated += 1
-        except sqlite3.Error as e:
+        except Exception as e:
             print(f"  [backfill] 更新失败 {ticker}: {e}", flush=True)
 
     print(f"[backfill] 完成: 更新 {updated} 条, 跳过 {skipped} 条, 数据不足 {insufficient} 条")

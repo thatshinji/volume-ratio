@@ -90,18 +90,21 @@ def switch_llm(profile_name: str) -> bool:
 
 def log_llm_call(model: str, success: bool = True):
     """记录 LLM 调用到数据库"""
-    import sqlite3
+    import duckdb
     from datetime import datetime
-    db_path = ROOT / "data" / "ratios.db"
+    db_path = ROOT / "data" / "ratios.duckdb"
     if not db_path.exists():
         return
     try:
-        with sqlite3.connect(str(db_path), timeout=5) as conn:
+        conn = duckdb.connect(str(db_path))
+        try:
             conn.execute(
                 "INSERT INTO llm_calls (timestamp, model, success) VALUES (?, ?, ?)",
                 (datetime.now().isoformat(), model, 1 if success else 0)
             )
-    except sqlite3.Error:
+        finally:
+            conn.close()
+    except Exception:
         pass
 
 

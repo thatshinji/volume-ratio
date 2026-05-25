@@ -7,7 +7,7 @@ cron 每1分钟扫描，触发信号时通过飞书机器人推送
 import json
 import fcntl
 import os
-import sqlite3
+import duckdb
 import sys
 import time
 from datetime import datetime
@@ -410,7 +410,7 @@ SIGNAL_PRIORITY = {
     "巨量": 4,
 }
 
-DB_PATH = ROOT / "data" / "ratios.db"
+DB_PATH = ROOT / "data" / "ratios.duckdb"
 
 
 def get_signal_state(ticker: str) -> Optional[str]:
@@ -418,7 +418,8 @@ def get_signal_state(ticker: str) -> Optional[str]:
     if not DB_PATH.exists():
         return None
     try:
-        with sqlite3.connect(DB_PATH, timeout=5) as conn:
+        conn = duckdb.connect(str(DB_PATH))
+        try:
             # 确保表存在
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS signal_states (
@@ -431,7 +432,9 @@ def get_signal_state(ticker: str) -> Optional[str]:
                 "SELECT state FROM signal_states WHERE ticker = ?", (ticker,)
             ).fetchone()
             return row[0] if row else None
-    except sqlite3.Error:
+        finally:
+            conn.close()
+    except Exception:
         return None
 
 
@@ -440,7 +443,8 @@ def update_signal_state(ticker: str, state: str):
     if not DB_PATH.exists():
         return
     try:
-        with sqlite3.connect(DB_PATH, timeout=5) as conn:
+        conn = duckdb.connect(str(DB_PATH))
+        try:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS signal_states (
                     ticker TEXT PRIMARY KEY,
@@ -451,9 +455,11 @@ def update_signal_state(ticker: str, state: str):
             conn.execute("""
                 INSERT INTO signal_states (ticker, state, updated_at)
                 VALUES (?, ?, ?)
-                ON CONFLICT(ticker) DO UPDATE SET state = ?, updated_at = ?
-            """, (ticker, state, datetime.now().isoformat(), state, datetime.now().isoformat()))
-    except sqlite3.Error:
+                ON CONFLICT(ticker) DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at
+            """, (ticker, state, datetime.now().isoformat()))
+        finally:
+            conn.close()
+    except Exception:
         pass
 
 
@@ -706,7 +712,8 @@ def _fetch_trend_data(tickers: list) -> dict:
     ticker_set = set(tickers)
     result = {}
     try:
-        with sqlite3.connect(DB_PATH, timeout=5) as conn:
+        conn = duckdb.connect(str(DB_PATH))
+        try:
             rows = conn.execute("""
                 SELECT ticker, historical_ratio, intraday_ratio
                 FROM volume_ratios
@@ -715,7 +722,9 @@ def _fetch_trend_data(tickers: list) -> dict:
             for ticker, hist, intra in rows:
                 if ticker in ticker_set:
                     result[ticker] = (hist or 0, intra or 0)
-    except sqlite3.Error:
+        finally:
+            conn.close()
+    except Exception:
         pass
     return result
 

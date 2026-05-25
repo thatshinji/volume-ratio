@@ -8,8 +8,8 @@ intraday_ratio = 最近 W 分钟成交量 / 今天前 B 分钟内每 W 分钟成
 
 import json
 import os
-import sqlite3
 import sys
+import duckdb
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).parent.parent
 SNAPSHOT_DIR = ROOT / "data" / "snapshots"
-DB_PATH = ROOT / "data" / "ratios.db"
+DB_PATH = ROOT / "data" / "ratios.duckdb"
 SCHEMA_VERSION = 4
 
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -56,14 +56,9 @@ _persistent_conn = None  # 持久数据库连接，用于高频写入场景（�
 
 
 def _get_persistent_conn():
-    """获取持久数据库连接，复用而非每次新建，解决 FD 泄漏问题。"""
-    global _persistent_conn
-    if _persistent_conn is None:
-        init_db()
-        _persistent_conn = sqlite3.connect(get_db_path(), timeout=30, check_same_thread=False)
-        _persistent_conn.execute("PRAGMA journal_mode=WAL")
-        _persistent_conn.execute("PRAGMA synchronous=NORMAL")
-    return _persistent_conn
+    """获取临时数据库连接（每次新建用完即关，DuckDB 无 FD 泄漏问题）。"""
+    init_db()
+    return duckdb.connect(str(get_db_path()))
 
 
 def _cache_put(cache: dict, key, value, max_items: int):
@@ -213,7 +208,7 @@ def _to_record(raw: dict, market: str) -> Optional[SnapshotRecord]:
     )
 
 
-def _row_to_record(row: sqlite3.Row) -> Optional[SnapshotRecord]:
+def _row_to_record(row) -> Optional[SnapshotRecord]:
     try:
         ts = parse_timestamp(row["last_timestamp"])
         market_ts = parse_timestamp(row["market_timestamp"])
@@ -236,11 +231,12 @@ def _row_to_record(row: sqlite3.Row) -> Optional[SnapshotRecord]:
         return None
 
 
-def _minute_bar_table_exists(conn: sqlite3.Connection) -> bool:
-    row = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='quote_minute_bars'"
-    ).fetchone()
-    return row is not None
+def _minute_bar_table_exists(conn: duckdb.DuckDBPyConnection) -> bool:
+    result = conn.execute("""
+        SELECT table_name FROM information_schema.tables
+        WHERE table_name = 'quote_minute_bars'
+    """).fetchone()
+    return result is not None
 
 
 def _ticker_has_minute_bars(ticker: str) -> bool:
@@ -248,7 +244,8 @@ def _ticker_has_minute_bars(ticker: str) -> bool:
         return _minute_bar_presence_cache[ticker]
     init_db()
     try:
-        with sqlite3.connect(get_db_path(), timeout=30) as conn:
+        conn = duckdb.connect(str(get_db_path()), read_only=True)
+        try:
             if not _minute_bar_table_exists(conn):
                 _cache_put(_minute_bar_presence_cache, ticker, False, MAX_PRESENCE_CACHE_ITEMS)
                 return False
@@ -259,12 +256,14 @@ def _ticker_has_minute_bars(ticker: str) -> bool:
             has_rows = row is not None
             _cache_put(_minute_bar_presence_cache, ticker, has_rows, MAX_PRESENCE_CACHE_ITEMS)
             return has_rows
-    except sqlite3.Error:
+        finally:
+            conn.close()
+    except Exception:
         return False
 
 
 def read_minute_bars(ticker: str, target_date: date = None) -> list[SnapshotRecord]:
-    """从 SQLite 分钟聚合表读取计算用快照，避免每次扫描全量 JSONL。"""
+    """从 DuckDB 分钟聚合表读取计算用快照，避免每次扫描全量 JSONL。"""
     init_db()
     cache_key = (ticker, target_date.isoformat() if target_date else "*")
     if cache_key in _minute_bar_cache:
@@ -277,8 +276,8 @@ def read_minute_bars(ticker: str, target_date: date = None) -> list[SnapshotReco
         params.append(target_date.isoformat())
 
     try:
-        with sqlite3.connect(get_db_path(), timeout=30) as conn:
-            conn.row_factory = sqlite3.Row
+        conn = duckdb.connect(str(get_db_path()), read_only=True)
+        try:
             if not _minute_bar_table_exists(conn):
                 _cache_put(_minute_bar_cache, cache_key, [], MAX_MINUTE_BAR_CACHE_ITEMS)
                 return []
@@ -292,7 +291,9 @@ def read_minute_bars(ticker: str, target_date: date = None) -> list[SnapshotReco
                 """,
                 params,
             ).fetchall()
-    except sqlite3.Error:
+        finally:
+            conn.close()
+    except Exception:
         return []
 
     records = [rec for row in rows if (rec := _row_to_record(row))]
@@ -377,7 +378,8 @@ def get_latest_snapshot_info(ticker: str, day: datetime = None) -> Optional[dict
 def _available_market_dates(ticker: str, before: date = None) -> list[date]:
     dates = set()
     try:
-        with sqlite3.connect(get_db_path(), timeout=30) as conn:
+        conn = duckdb.connect(str(get_db_path()), read_only=True)
+        try:
             minute_rows = conn.execute(
                 "SELECT DISTINCT market_date FROM quote_minute_bars WHERE ticker = ?",
                 (ticker,),
@@ -386,8 +388,10 @@ def _available_market_dates(ticker: str, before: date = None) -> list[date]:
                 "SELECT DISTINCT market_date FROM quote_snapshots WHERE ticker = ? AND market_date != ''",
                 (ticker,),
             ).fetchall()
+        finally:
+            conn.close()
         dates.update(date.fromisoformat(row[0]) for row in minute_rows + snapshot_rows)
-    except (sqlite3.Error, ValueError):
+    except (Exception, ValueError):
         pass
 
     if not dates and not _ticker_has_minute_bars(ticker):
@@ -665,11 +669,15 @@ def get_db_path() -> Path:
     return DB_PATH
 
 
-def _create_tables(conn: sqlite3.Connection):
-    """创建所有表和索引（IF NOT EXISTS）。"""
+def _create_tables(conn: duckdb.DuckDBPyConnection):
+    """创建所有表和索引（IF NOT EXISTS）。DuckDB 需要 sequence 来实现自增 id。"""
+    # 先创建 sequence（IF NOT EXISTS 支持）
+    for seq in ("quote_snapshots_id_seq", "volume_ratios_id_seq", "signals_id_seq", "llm_calls_id_seq"):
+        conn.execute(f"CREATE SEQUENCE IF NOT EXISTS {seq} START 1")
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS quote_snapshots (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id INTEGER PRIMARY KEY DEFAULT nextval('quote_snapshots_id_seq'),
             ticker TEXT NOT NULL,
             market TEXT NOT NULL,
             timestamp TEXT NOT NULL,
@@ -683,8 +691,7 @@ def _create_tables(conn: sqlite3.Connection):
             turnover REAL,
             change REAL,
             change_pct REAL,
-            source TEXT DEFAULT 'websocket',
-            UNIQUE(ticker, timestamp, volume, price)
+            source TEXT DEFAULT 'websocket'
         )
     """)
     conn.execute("""
@@ -710,7 +717,7 @@ def _create_tables(conn: sqlite3.Connection):
     """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS volume_ratios (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id INTEGER PRIMARY KEY DEFAULT nextval('volume_ratios_id_seq'),
             ticker TEXT NOT NULL,
             name TEXT,
             timestamp TEXT NOT NULL,
@@ -732,13 +739,12 @@ def _create_tables(conn: sqlite3.Connection):
             cond_vol INTEGER DEFAULT 0,
             cond_stop INTEGER DEFAULT 0,
             cond_stable INTEGER DEFAULT 0,
-            data_quality TEXT,
-            UNIQUE(ticker, timestamp)
+            data_quality TEXT
         )
     """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS signals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id INTEGER PRIMARY KEY DEFAULT nextval('signals_id_seq'),
             ticker TEXT NOT NULL,
             name TEXT,
             timestamp TEXT NOT NULL,
@@ -767,7 +773,7 @@ def _create_tables(conn: sqlite3.Connection):
     """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS llm_calls (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id INTEGER PRIMARY KEY DEFAULT nextval('llm_calls_id_seq'),
             timestamp TEXT NOT NULL,
             model TEXT,
             success INTEGER DEFAULT 1
@@ -783,7 +789,7 @@ def _create_tables(conn: sqlite3.Connection):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_type_time ON signals(signal_type, timestamp)")
 
 
-def _migrate_schema(conn: sqlite3.Connection, current_version: int):
+def _migrate_schema(conn: duckdb.DuckDBPyConnection, current_version: int):
     """处理 schema 版本迁移。"""
     if current_version not in (2, 3, SCHEMA_VERSION):
         for table in ("volume_ratios", "quote_snapshots", "quote_minute_bars", "signals", "signal_states", "schema_meta"):
@@ -804,34 +810,35 @@ def _migrate_schema(conn: sqlite3.Connection, current_version: int):
             default = " DEFAULT ''" if col == "market" else ""
             try:
                 conn.execute(f"ALTER TABLE signals ADD COLUMN {col} {col_type}{default}")
-            except sqlite3.OperationalError:
+            except Exception:
                 pass
         conn.execute("UPDATE schema_meta SET value = ? WHERE key = 'schema_version'", (str(SCHEMA_VERSION),))
 
 
 def init_db():
-    """初始化 SQLite。"""
+    """初始化 DuckDB。"""
     global _db_initialized
     if _db_initialized:
         return
 
     db_path = get_db_path()
-    with sqlite3.connect(db_path, timeout=30) as conn:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
+    conn = duckdb.connect(str(db_path))
+    try:
         current_version = _get_schema_version(conn)
         _migrate_schema(conn, current_version)
         _create_tables(conn)
+    finally:
+        conn.close()
     _db_initialized = True
 
 
-def _get_schema_version(conn: sqlite3.Connection) -> int:
+def _get_schema_version(conn: duckdb.DuckDBPyConnection) -> int:
     try:
         row = conn.execute(
             "SELECT value FROM schema_meta WHERE key = 'schema_version'"
         ).fetchone()
         return int(row[0]) if row else 0
-    except sqlite3.Error:
+    except Exception:
         return 0
 
 
@@ -856,7 +863,7 @@ def save_quote_minute_bar(
     ticker: str,
     data: dict,
     source: str = "websocket",
-    conn: sqlite3.Connection = None,
+    conn: duckdb.DuckDBPyConnection = None,
 ):
     """保存一分钟一条的累计量快照，供量比计算快速读取。"""
     market = get_market(ticker)
@@ -900,7 +907,7 @@ def save_quote_minute_bar(
         now,
     )
 
-    def execute(target: sqlite3.Connection):
+    def execute(target: duckdb.DuckDBPyConnection):
         target.execute("""
             INSERT INTO quote_minute_bars
             (ticker, market, market_date, market_minute, market_timestamp,
@@ -914,9 +921,9 @@ def save_quote_minute_bar(
                 close = CASE
                     WHEN excluded.last_timestamp >= quote_minute_bars.last_timestamp
                     THEN excluded.close ELSE quote_minute_bars.close END,
-                high = MAX(quote_minute_bars.high, excluded.high),
-                low = MIN(quote_minute_bars.low, excluded.low),
-                volume = MAX(quote_minute_bars.volume, excluded.volume),
+                high = CASE WHEN excluded.high > quote_minute_bars.high THEN excluded.high ELSE quote_minute_bars.high END,
+                low = CASE WHEN excluded.low < quote_minute_bars.low THEN excluded.low ELSE quote_minute_bars.low END,
+                volume = CASE WHEN excluded.volume > quote_minute_bars.volume THEN excluded.volume ELSE quote_minute_bars.volume END,
                 turnover = CASE
                     WHEN excluded.turnover >= quote_minute_bars.turnover
                     THEN excluded.turnover ELSE quote_minute_bars.turnover END,
@@ -930,18 +937,16 @@ def save_quote_minute_bar(
     try:
         if conn is None:
             init_db()
-            with sqlite3.connect(get_db_path(), timeout=30) as own_conn:
+            own_conn = duckdb.connect(str(get_db_path()))
+            try:
                 execute(own_conn)
+            finally:
+                own_conn.close()
         else:
             execute(conn)
         _clear_bar_caches(ticker)
-    except sqlite3.Error as e:
+    except Exception as e:
         print(f"[compute] save_quote_minute_bar 失败 {ticker}: {e}", flush=True)
-        if conn is not None:
-            try:
-                conn.rollback()
-            except sqlite3.Error:
-                pass
 
 
 def save_quote_snapshot(ticker: str, data: dict, source: str = "websocket"):
@@ -949,10 +954,11 @@ def save_quote_snapshot(ticker: str, data: dict, source: str = "websocket"):
     market = get_market(ticker)
     ts = parse_timestamp(data.get("timestamp", ""))
     market_ts = _to_market_dt(ts, market) if ts else None
+    conn = None
     try:
         conn = _get_persistent_conn()
         conn.execute("""
-            INSERT OR IGNORE INTO quote_snapshots
+            INSERT INTO quote_snapshots
             (ticker, market, timestamp, market_timestamp, market_date, price, open, high, low,
              volume, turnover, change, change_pct, source)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -973,9 +979,11 @@ def save_quote_snapshot(ticker: str, data: dict, source: str = "websocket"):
             source,
         ))
         save_quote_minute_bar(ticker, data, source=source, conn=conn)
-        conn.commit()
-    except sqlite3.Error as e:
+    except Exception as e:
         print(f"[compute] save_quote_snapshot 失败 {ticker}: {e}", flush=True)
+    finally:
+        if conn:
+            conn.close()
 
 
 def save_ratio(result: dict):
@@ -986,6 +994,7 @@ def save_ratio(result: dict):
     if last_write and (now - last_write).total_seconds() < RATIO_WRITE_INTERVAL:
         return
 
+    conn = None
     try:
         conn = _get_persistent_conn()
         conn.execute("""
@@ -1019,10 +1028,12 @@ def save_ratio(result: dict):
             int(bool(result.get("cond_stable", False))),
             result.get("data_quality", ""),
         ))
-        conn.commit()
         _last_ratio_write[ticker] = now
-    except sqlite3.Error as e:
+    except Exception as e:
         print(f"[compute] save_ratio 失败 {ticker}: {e}", flush=True)
+    finally:
+        if conn:
+            conn.close()
 
 
 def save_signal(ticker: str, name: str, signal_type: str, ratio: float,
@@ -1031,13 +1042,16 @@ def save_signal(ticker: str, name: str, signal_type: str, ratio: float,
     init_db()
     now = datetime.now().isoformat()
     try:
-        with sqlite3.connect(get_db_path(), timeout=30) as conn:
+        conn = duckdb.connect(str(get_db_path()))
+        try:
             conn.execute("""
                 INSERT INTO signals
                 (ticker, name, timestamp, signal_type, ratio, price, change_pct, source, llm_analysis, notified, market)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (ticker, name, now, signal_type, ratio, price, change_pct, source, llm_analysis, notified, market))
-    except sqlite3.Error as e:
+        finally:
+            conn.close()
+    except Exception as e:
         print(f"[compute] save_signal 失败 {ticker}: {e}", flush=True)
 
 
@@ -1046,7 +1060,8 @@ def get_signal_stats(signal_type: str = "", ticker: str = "", days: int = 30) ->
     init_db()
     cutoff = (datetime.now() - timedelta(days=days)).isoformat()
     try:
-        with sqlite3.connect(get_db_path(), timeout=10) as conn:
+        conn = duckdb.connect(str(get_db_path()), read_only=True)
+        try:
             row = conn.execute("""
                 SELECT
                     COUNT(*) as total,
@@ -1077,7 +1092,9 @@ def get_signal_stats(signal_type: str = "", ticker: str = "", days: int = 30) ->
                 "win_rate_5d": round((row[5] or 0) / total * 100, 1),
                 "avg_return_5d": round(row[6] or 0, 2),
             }
-    except sqlite3.Error as e:
+        finally:
+            conn.close()
+    except Exception as e:
         print(f"[compute] get_signal_stats 失败: {e}", flush=True)
         return {"total": 0}
 

@@ -6,7 +6,7 @@
 
 import argparse
 import os
-import sqlite3
+import duckdb
 import subprocess
 import sys
 from datetime import datetime, timedelta
@@ -167,15 +167,18 @@ def cmd_status():
     print(f"  LLM:       ✅ {model}")
 
     # 数据库
-    db_path = ROOT / "data" / "ratios.db"
+    db_path = ROOT / "data" / "ratios.duckdb"
     if db_path.exists():
         try:
-            with sqlite3.connect(db_path, timeout=5) as conn:
+            conn = duckdb.connect(str(db_path))
+            try:
                 count = conn.execute("SELECT COUNT(*) FROM volume_ratios").fetchone()[0]
                 size = db_path.stat().st_size
                 warn = " ⚠️ 接近上限" if size >= DB_MAX_BYTES * 0.8 else ""
                 print(f"  数据库:    {count:,} 条记录 ({format_size(size)} / {format_size(DB_MAX_BYTES)}){warn}")
-        except sqlite3.Error:
+            finally:
+                conn.close()
+        except Exception:
             print(f"  数据库:    ⚠️ 读取失败")
     else:
         print(f"  数据库:    ❌ 不存在")
@@ -220,8 +223,8 @@ def _get_latest_snapshot_time() -> str:
 
 def cmd_history(ticker: str):
     """查询近 7 日量比趋势"""
-    import sqlite3
-    db_path = ROOT / "data" / "ratios.db"
+    import duckdb
+    db_path = ROOT / "data" / "ratios.duckdb"
     if not db_path.exists():
         print("数据库不存在")
         return
@@ -231,7 +234,8 @@ def cmd_history(ticker: str):
     cutoff = (datetime.now() - timedelta(days=7)).isoformat()
 
     try:
-        with sqlite3.connect(db_path, timeout=10) as conn:
+        conn = duckdb.connect(str(db_path))
+        try:
             rows = conn.execute("""
                 SELECT timestamp, historical_ratio, price, change_pct, historical_signal,
                        historical_today_volume, historical_avg_volume, historical_sample_days
@@ -239,7 +243,9 @@ def cmd_history(ticker: str):
                 WHERE ticker = ? AND timestamp > ?
                 ORDER BY timestamp
             """, (ticker, cutoff)).fetchall()
-    except sqlite3.Error as e:
+        finally:
+            conn.close()
+    except Exception as e:
         print(f"查询失败: {e}")
         return
 
@@ -262,8 +268,8 @@ def cmd_history(ticker: str):
 
 def cmd_signals():
     """查询今日信号"""
-    import sqlite3
-    db_path = ROOT / "data" / "ratios.db"
+    import duckdb
+    db_path = ROOT / "data" / "ratios.duckdb"
     if not db_path.exists():
         print("数据库不存在")
         return
@@ -271,14 +277,17 @@ def cmd_signals():
     today = datetime.now().strftime("%Y-%m-%d")
 
     try:
-        with sqlite3.connect(db_path, timeout=10) as conn:
+        conn = duckdb.connect(str(db_path))
+        try:
             rows = conn.execute("""
                 SELECT ticker, name, signal_type, ratio, price, change_pct, source, timestamp
                 FROM signals
                 WHERE timestamp LIKE ?
                 ORDER BY timestamp
             """, (f"{today}%",)).fetchall()
-    except sqlite3.Error as e:
+        finally:
+            conn.close()
+    except Exception as e:
         print(f"查询失败: {e}")
         return
 

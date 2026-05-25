@@ -5,22 +5,19 @@
 
 清理规则：
   - JSONL 快照：保留 20 天
-  - quote_snapshots：保留 20 天
-  - quote_minute_bars：保留 20 天
-  - volume_ratios：保留 20 天
-  - signals：保留 20 天
+  - DuckDB 数据库：保留 20 天
   - 快照目录：超过 3GB 时删除最旧快照，降到 2.7GB 以下
-  - SQLite 数据库：超过 1GB 时清理旧数据并 VACUUM
+  - DuckDB 数据库：超过 1GB 时清理旧数据
 """
 
-import sqlite3
 import sys
+import duckdb
 from datetime import datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
 SNAPSHOT_DIR = ROOT / "data" / "snapshots"
-DB_PATH = ROOT / "data" / "ratios.db"
+DB_PATH = ROOT / "data" / "ratios.duckdb"
 
 sys.path.insert(0, str(ROOT / "scripts"))
 
@@ -125,12 +122,14 @@ def cleanup_database(table: str, keep_days: int):
     timestamp_column = "last_timestamp" if table == "quote_minute_bars" else "timestamp"
 
     try:
-        with sqlite3.connect(DB_PATH, timeout=30) as conn:
+        conn = duckdb.connect(str(DB_PATH))
+        try:
             cursor = conn.execute(f"DELETE FROM {table} WHERE {timestamp_column} < ?", (cutoff,))
             if cursor.rowcount > 0:
                 print(f"[cleanup] {table}: 删除 {cursor.rowcount} 条过期记录")
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    except sqlite3.OperationalError as e:
+        finally:
+            conn.close()
+    except Exception as e:
         print(f"[cleanup] {table} 清理失败: {e}")
 
 
@@ -141,33 +140,25 @@ def cleanup_optional_database_table(table: str, keep_days: int, timestamp_column
 
     cutoff = (datetime.now() - timedelta(days=keep_days)).isoformat()
     try:
-        with sqlite3.connect(DB_PATH, timeout=30) as conn:
-            exists = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-                (table,),
-            ).fetchone()
+        conn = duckdb.connect(str(DB_PATH))
+        try:
+            exists = conn.execute("""
+                SELECT table_name FROM information_schema.tables WHERE table_name = ?
+            """, (table,)).fetchone()
             if not exists:
                 return
             cursor = conn.execute(f"DELETE FROM {table} WHERE {timestamp_column} < ?", (cutoff,))
             if cursor.rowcount > 0:
                 print(f"[cleanup] {table}: 删除 {cursor.rowcount} 条过期记录")
-            # 轻量 checkpoint：删除后截断 WAL 文件，归还磁盘空间（比 VACUUM 快很多）
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    except sqlite3.OperationalError as e:
+        finally:
+            conn.close()
+    except Exception as e:
         print(f"[cleanup] {table} 清理失败: {e}")
 
 
 def cleanup_wal_files():
-    """清理已 checkpoint 的 WAL 文件"""
-    for suffix in ("-wal", "-shm"):
-        f = DB_PATH.with_suffix(DB_PATH.suffix + suffix)
-        if f.exists():
-            try:
-                size = f.stat().st_size
-                f.unlink()
-                print(f"[cleanup] 删除 WAL 文件 {f.name} ({format_size(size)})")
-            except OSError:
-                pass
+    """DuckDB 无 WAL 文件，NOP"""
+    pass
 
 
 _snapshot_scan_cache = None  # (files, total_bytes) 缓存，避免同一次运行中重复扫描
@@ -234,16 +225,17 @@ def cleanup_snapshot_size_limit(dry_run: bool = False):
 
 
 def vacuum_database():
-    """压缩 SQLite 文件，把 DELETE 释放的页真正还给磁盘。"""
+    """压缩 DuckDB 文件，把 DELETE 释放的空间真正还给磁盘。DuckDB 很少需要此操作。"""
     if not DB_PATH.exists():
         return
     before = DB_PATH.stat().st_size
     try:
-        with sqlite3.connect(DB_PATH, timeout=60) as conn:
-            conn.execute("PRAGMA journal_mode=DELETE")
+        conn = duckdb.connect(str(DB_PATH))
+        try:
             conn.execute("VACUUM")
-            conn.execute("PRAGMA journal_mode=WAL")
-    except sqlite3.OperationalError as e:
+        finally:
+            conn.close()
+    except Exception as e:
         print(f"[cleanup] VACUUM 失败: {e}")
         return
     after = DB_PATH.stat().st_size
@@ -252,7 +244,7 @@ def vacuum_database():
 
 
 def backup_database():
-    """每日备份数据库：WAL checkpoint 后复制一份，保留 7 份。"""
+    """每日备份数据库：复制一份，保留 7 份。"""
     import shutil
     import time
 
@@ -261,16 +253,9 @@ def backup_database():
 
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 
-    # WAL checkpoint 确保所有数据已落盘
-    try:
-        with sqlite3.connect(DB_PATH, timeout=30) as conn:
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    except sqlite3.OperationalError:
-        return
-
-    # 备份文件名：ratios_YYYYMMDD.db
+    # 备份文件名：ratios_YYYYMMDD.duckdb
     today = datetime.now().strftime("%Y%m%d")
-    backup_path = BACKUP_DIR / f"ratios_{today}.db"
+    backup_path = BACKUP_DIR / f"ratios_{today}.duckdb"
 
     try:
         shutil.copy2(DB_PATH, backup_path)
@@ -282,7 +267,7 @@ def backup_database():
     # 删除 7 天前的备份
     cutoff = datetime.now() - timedelta(days=BACKUP_KEEP_DAYS)
     for f in BACKUP_DIR.iterdir():
-        if not f.name.startswith("ratios_") or not f.name.endswith(".db"):
+        if not f.name.startswith("ratios_") or not f.name.endswith(".duckdb"):
             continue
         try:
             mtime = datetime.fromtimestamp(f.stat().st_mtime)
@@ -297,21 +282,12 @@ _last_backup_date = None
 
 
 def run_daily_if_needed():
-    """每天只执行一次每日任务（checkpoint + 备份）。"""
+    """每天只执行一次每日任务（备份）。"""
     global _last_backup_date
     today = datetime.now().strftime("%Y%m%d")
     if _last_backup_date == today:
         return
     _last_backup_date = today
-
-    # WAL checkpoint（截断 WAL 文件，归还磁盘空间）
-    try:
-        with sqlite3.connect(DB_PATH, timeout=30) as conn:
-            result = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-            # result: (checkpointed_pages, WAL_pages, drywall_pages)
-            # 0,0 表示已完全 checkpoint
-    except sqlite3.OperationalError:
-        pass
 
     backup_database()
 
@@ -358,15 +334,15 @@ def emergency_trim_database(dry_run: bool = False):
     batch_size = 50_000
 
     if dry_run:
-        print("[cleanup] dry-run: 数据库 VACUUM 后若仍超限，将按最旧记录分批裁剪")
+        print("[cleanup] dry-run: 数据库若仍超限，将按最旧记录分批裁剪")
         return
 
     def delete_oldest_batch(table: str, timestamp_column: str) -> int:
-        with sqlite3.connect(DB_PATH, timeout=60) as conn:
-            exists = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-                (table,),
-            ).fetchone()
+        conn = duckdb.connect(str(DB_PATH))
+        try:
+            exists = conn.execute("""
+                SELECT table_name FROM information_schema.tables WHERE table_name = ?
+            """, (table,)).fetchone()
             if not exists:
                 return 0
             cursor = conn.execute(
@@ -381,6 +357,8 @@ def emergency_trim_database(dry_run: bool = False):
                 (batch_size,),
             )
             return cursor.rowcount
+        finally:
+            conn.close()
 
     max_iterations = 20
     for table, timestamp_column in tables:
@@ -396,8 +374,6 @@ def emergency_trim_database(dry_run: bool = False):
             print(f"[cleanup] {table}: 容量兜底删除最旧记录 {removed_total} 条")
         if DB_PATH.stat().st_size <= DB_MAX_BYTES:
             break
-
-    vacuum_database()
 
     size = DB_PATH.stat().st_size
     if size > DB_MAX_BYTES:
