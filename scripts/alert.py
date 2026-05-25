@@ -503,77 +503,83 @@ def should_push(ticker: str, new_state: str) -> bool:
     return True
 
 
-def _build_batch_card(alerts_with_analysis: list) -> dict:
-    """将多个告警合并为一张飞书卡片（表格 + LLM 分析）"""
+MAX_ALERTS_PER_CARD = 20
+
+
+def _build_batch_card(alerts_with_analysis: list) -> list[dict]:
+    """将多个告警合并为一张飞书卡片，超限时分为多批。"""
     from core.display import build_market_table
 
-    # 按市场分组
-    us, hk, cn = [], [], []
-    for alert, analysis in alerts_with_analysis:
-        ticker = alert.get("ticker", "")
-        change = float(alert.get("change_pct") or 0)
-        entry = {
-            "ticker": ticker,
-            "name": alert.get("name", ticker),
-            "price": alert.get("price", 0),
-            "change_pct": change,
-            "ratio": alert.get("ratio", 0),
-            "ratio_intraday": alert.get("intraday_ratio", 0),
-            "historical_sample_days": alert.get("historical_sample_days", 0),
-            "_analysis": analysis,
-            "_signals": ", ".join(alert.get("triggered_signals", [])) or alert.get("signal", ""),
+    def _build_one_card(batch: list, batch_idx: int, total_batches: int) -> dict:
+        us, hk, cn = [], [], []
+        for alert, analysis in batch:
+            ticker = alert.get("ticker", "")
+            change = float(alert.get("change_pct") or 0)
+            entry = {
+                "ticker": ticker,
+                "name": alert.get("name", ticker),
+                "price": alert.get("price", 0),
+                "change_pct": change,
+                "ratio": alert.get("ratio", 0),
+                "ratio_intraday": alert.get("intraday_ratio", 0),
+                "historical_sample_days": alert.get("historical_sample_days", 0),
+                "_analysis": analysis,
+                "_signals": ", ".join(alert.get("triggered_signals", [])) or alert.get("signal", ""),
+            }
+            if ticker.endswith(".US"):
+                us.append(entry)
+            elif ticker.endswith(".HK"):
+                hk.append(entry)
+            else:
+                cn.append(entry)
+
+        elements = []
+        for label, tickers in [("🇺🇸 美股", us), ("🇭🇰 港股", hk), ("🇨🇳 A股", cn)]:
+            if not tickers:
+                continue
+            elements.extend(build_market_table(label, tickers))
+
+        from compute import get_signal_stats
+        seen_signal_types = set()
+        for alert, _ in batch:
+            sig = alert.get("signal", "")
+            if sig:
+                seen_signal_types.add(sig)
+        stats_lines = []
+        for sig in seen_signal_types:
+            st = get_signal_stats(signal_type=sig)
+            if st["total"] > 0:
+                stats_lines.append(
+                    f"  {sig}: {st['win_rate_3d']}% 胜率 ({st['win_3d']}/{st['total']})，"
+                    f"平均{st['avg_return_3d']:+.1f}% (3日)"
+                )
+        if stats_lines:
+            elements.append({"tag": "hr"})
+            elements.append({"tag": "div", "text": {"tag": "lark_md",
+                "content": "**📊 历史胜率（近30天）**\n" + "\n".join(stats_lines)}})
+
+        analysis_lines = []
+        for alert, analysis in batch:
+            if analysis:
+                ticker = alert.get("ticker", "?")
+                name = alert.get("name", ticker)
+                analysis_lines.append(f"**{ticker}-{name}:** {analysis}")
+        if analysis_lines:
+            elements.append({"tag": "hr"})
+            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(analysis_lines)}})
+
+        title = f"🚨 量比告警 ({len(batch)}个信号)"
+        if total_batches > 1:
+            title += f" ({batch_idx + 1}/{total_batches})"
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {"title": {"tag": "plain_text", "content": title}},
+            "elements": elements,
         }
-        if ticker.endswith(".US"):
-            us.append(entry)
-        elif ticker.endswith(".HK"):
-            hk.append(entry)
-        else:
-            cn.append(entry)
 
-    # 构建表格元素
-    elements = []
-    for label, tickers in [("🇺🇸 美股", us), ("🇭🇰 港股", hk), ("🇨🇳 A股", cn)]:
-        if not tickers:
-            continue
-        elements.extend(build_market_table(label, tickers))
-
-    # 历史胜率
-    from compute import get_signal_stats
-    seen_signal_types = set()
-    for alert, _ in alerts_with_analysis:
-        sig = alert.get("signal", "")
-        if sig:
-            seen_signal_types.add(sig)
-    stats_lines = []
-    for sig in seen_signal_types:
-        st = get_signal_stats(signal_type=sig)
-        if st["total"] > 0:
-            stats_lines.append(
-                f"  {sig}: {st['win_rate_3d']}% 胜率 ({st['win_3d']}/{st['total']})，"
-                f"平均{st['avg_return_3d']:+.1f}% (3日)"
-            )
-    if stats_lines:
-        elements.append({"tag": "hr"})
-        elements.append({"tag": "div", "text": {"tag": "lark_md",
-            "content": "**📊 历史胜率（近30天）**\n" + "\n".join(stats_lines)}})
-
-    # LLM 分析汇总
-    analysis_lines = []
-    for alert, analysis in alerts_with_analysis:
-        if analysis:
-            ticker = alert.get("ticker", "?")
-            name = alert.get("name", ticker)
-            analysis_lines.append(f"**{ticker}-{name}:** {analysis}")
-    if analysis_lines:
-        elements.append({"tag": "hr"})
-        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(analysis_lines)}})
-
-    count = len(alerts_with_analysis)
-    return {
-        "config": {"wide_screen_mode": True},
-        "header": {"title": {"tag": "plain_text", "content": f"🚨 量比告警 ({count}个信号)"}},
-        "elements": elements,
-    }
+    batches = [alerts_with_analysis[i:i + MAX_ALERTS_PER_CARD]
+               for i in range(0, len(alerts_with_analysis), MAX_ALERTS_PER_CARD)]
+    return [_build_one_card(b, i, len(batches)) for i, b in enumerate(batches)]
 
 
 def _build_mute_expiry_card(expired_tickers: list) -> dict:
@@ -699,11 +705,12 @@ def scan_and_alert():
 
         alerts_with_analysis.append((alert, analysis))
 
-    # #10: 发送合并卡片
+    # #10: 发送合并卡片（超限时分批）
     if alerts_with_analysis:
-        card = _build_batch_card(alerts_with_analysis)
-        send_feishu_card(card)
-        print(f"[alert] 推送完成: {len(alerts_with_analysis)} 个信号（合并卡片）")
+        cards = _build_batch_card(alerts_with_analysis)
+        for card in cards:
+            send_feishu_card(card)
+        print(f"[alert] 推送完成: {len(alerts_with_analysis)} 个信号（{len(cards)}张卡片）")
 
     # #8: 静默到期通知
     if expired_mutes:

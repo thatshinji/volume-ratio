@@ -26,23 +26,19 @@ def format_size(size_bytes: int) -> str:
 
 
 def format_ratio_display(ratio: float) -> str:
-    """
-    量比显示：符号 + 中文双标识
-    阈值与 get_signal() 保持一致
-    """
-    if ratio <= 0:
-        return "数据不足"
-    elif ratio < 0.6:
-        return "⬇⬇  缩量异常"
-    elif ratio < 0.8:
-        return "⬇   缩量"
-    elif ratio <= 1.2:
-        return "─    正常"
-    elif ratio <= 2.0:
-        return "⬆   放量"
-    elif ratio <= 5.0:
-        return "⬆⬆  显著放量"
-    return "⬆⬆⬆ 巨量"
+    """量比显示：符号 + 中文双标识。阈值统一在 core/thresholds.py 中管理。"""
+    from core.thresholds import ratio_display_label
+    label = ratio_display_label(ratio)
+    symbols = {
+        "数据不足": "─    ",
+        "缩量异常": "⬇⬇  ",
+        "缩量": "⬇   ",
+        "正常": "─    ",
+        "放量": "⬆   ",
+        "显著放量": "⬆⬆  ",
+        "巨量": "⬆⬆⬆ ",
+    }
+    return symbols.get(label, "─    ") + label
 
 
 def format_ticker_line(ticker: str, name: str, change_pct: float,

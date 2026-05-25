@@ -24,7 +24,8 @@ SCHEMA_VERSION = 4
 
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from core.config import load_config, MARKET_SESSIONS
+from core.config import load_config, MARKET_SESSIONS, MARKET_END_OF_DAY
+from core.thresholds import classify_ratio
 from core.market import get_market, get_all_tickers, get_ticker_name, is_market_trading
 from core.market import _is_trading_day as is_trading_day, is_trading_day_on
 from core.silence import suppress_stdout
@@ -433,19 +434,7 @@ def _window_volume(records: list[SnapshotRecord], end_minute: int, window_minute
 
 def get_signal(ratio: float, current_time: datetime = None) -> str:
     """根据历史同期量比范围判断信号。"""
-    if ratio <= 0:
-        return "数据不足"
-    if ratio < 0.6:
-        return "缩量异常"
-    if ratio < 0.8:
-        return "缩量"
-    if ratio <= 1.2:
-        return "正常"
-    if ratio <= 2.0:
-        return "放量"
-    if ratio <= 5.0:
-        return "显著放量"
-    return "巨量"
+    return classify_ratio(ratio)
 
 
 def calc_volume_ratio(ticker: str, current_time: datetime = None, api_vol_data: dict = None) -> tuple:
@@ -478,17 +467,13 @@ def _resolve_session_time(ticker: str, current_time: datetime = None) -> tuple:
     market_date = market_dt.date()
     target_minute = market_dt.hour * 60 + market_dt.minute
 
-    if _is_regular_session(market, market_dt):
-        records = _records_for_date(ticker, market_date)
-    else:
-        records = _fallback_to_latest(ticker)
-        if records:
-            market_dt, market_date, target_minute = records[0].market_ts, records[0].market_date, records[0].market_minutes
+    records = _records_for_date(ticker, market_date)
 
-    if not records:
+    if not records or not _is_regular_session(market, market_dt):
         records = _fallback_to_latest(ticker)
-        if records:
-            market_dt, market_date, target_minute = records[0].market_ts, records[0].market_date, records[0].market_minutes
+
+    if records:
+        market_dt, market_date, target_minute = records[0].market_ts, records[0].market_date, records[0].market_minutes
 
     return market_dt, market_date, target_minute, records
 
@@ -659,7 +644,8 @@ def get_signal_detail(ratio: float, price_change: float = 0, market: str = "CN")
         return "缩量止跌"
     if ratio > 1.5 and market == "CN":
         now = _get_market_now(market)
-        if (now.hour == 14 and now.minute >= 30) or now.hour == 15:
+        eod = MARKET_END_OF_DAY.get(market)
+        if eod and (now.hour > eod[0] or (now.hour == eod[0] and now.minute >= eod[1])):
             return "尾盘放量"
     return ""
 

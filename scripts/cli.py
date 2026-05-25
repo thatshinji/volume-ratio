@@ -129,6 +129,15 @@ def format_ticker_output(result: dict, with_analysis: bool = False) -> str:
 
 # === 新增命令 ===
 
+def _pid_is_alive(pid: int) -> bool:
+    """检查进程是否存活。"""
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def cmd_status():
     """系统健康状态检查"""
     print("=== 系统状态 ===")
@@ -136,20 +145,20 @@ def cmd_status():
     # WebSocket 采集进程
     pid_file = ROOT / "logs" / "ws_collect.pid"
     lock_pid = locked_pid(ROOT / "logs" / "ws_collect.lock", pid_file)
-    ws_ok = False
     if lock_pid:
-        ws_ok = True
         latest_time = _get_latest_snapshot_time()
         print(f"  WebSocket: ✅ PID {lock_pid}, 最近采集 {latest_time}")
     elif pid_file.exists():
         try:
             pid = int(pid_file.read_text().strip())
-            os.kill(pid, 0)
-            # 检查最近采集时间
-            latest_time = _get_latest_snapshot_time()
-            print(f"  WebSocket: ✅ PID {pid}, 最近采集 {latest_time}")
         except (ValueError, OSError):
-            print(f"  WebSocket: ❌ PID 文件存在但进程不存活")
+            print(f"  WebSocket: ❌ PID 文件无效")
+        else:
+            if _pid_is_alive(pid):
+                latest_time = _get_latest_snapshot_time()
+                print(f"  WebSocket: ✅ PID {pid}, 最近采集 {latest_time}")
+            else:
+                print(f"  WebSocket: ❌ PID 文件存在但进程不存活")
     else:
         print(f"  WebSocket: ❌ 未运行")
 
