@@ -18,6 +18,18 @@ import threading
 import time
 import fcntl
 from datetime import datetime
+
+
+def _duckdb_connect(path, retries=3):
+    """带重试的 DuckDB 连接，绕过 macOS 文件锁冲突。"""
+    for attempt in range(retries):
+        try:
+            return duckdb.connect(str(path))
+        except duckdb.IOException as e:
+            if attempt < retries - 1 and "lock" in str(e).lower():
+                time.sleep(0.1 * (attempt + 1))
+                continue
+            raise
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
@@ -195,7 +207,7 @@ def build_status_card() -> dict:
 
     if db_path.exists():
         try:
-            conn = duckdb.connect(str(db_path))
+            conn = _duckdb_connect(db_path)
             try:
                 row = conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
                 schema_version = row[0] if row else "legacy"
@@ -905,7 +917,7 @@ def _check_component_status() -> dict:
     db_path = ROOT / "data" / "ratios.duckdb"
     if db_path.exists():
         try:
-            conn = duckdb.connect(str(db_path))
+            conn = _duckdb_connect(db_path)
             try:
                 count = conn.execute("SELECT COUNT(*) FROM volume_ratios").fetchone()[0]
                 status["db"] = ("✅", f"{count:,} 条记录")

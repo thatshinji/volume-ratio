@@ -12,7 +12,20 @@
 
 import sys
 import duckdb
+import time
 from datetime import datetime, timedelta
+
+
+def _duckdb_connect(path, retries=3):
+    """带重试的 DuckDB 连接，绕过 macOS 文件锁冲突。"""
+    for attempt in range(retries):
+        try:
+            return duckdb.connect(str(path))
+        except duckdb.IOException as e:
+            if attempt < retries - 1 and "lock" in str(e).lower():
+                time.sleep(0.1 * (attempt + 1))
+                continue
+            raise
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
@@ -122,7 +135,7 @@ def cleanup_database(table: str, keep_days: int):
     timestamp_column = "last_timestamp" if table == "quote_minute_bars" else "timestamp"
 
     try:
-        conn = duckdb.connect(str(DB_PATH))
+        conn = _duckdb_connect(DB_PATH)
         try:
             cursor = conn.execute(f"DELETE FROM {table} WHERE {timestamp_column} < ?", (cutoff,))
             if cursor.rowcount > 0:
@@ -140,7 +153,7 @@ def cleanup_optional_database_table(table: str, keep_days: int, timestamp_column
 
     cutoff = (datetime.now() - timedelta(days=keep_days)).isoformat()
     try:
-        conn = duckdb.connect(str(DB_PATH))
+        conn = _duckdb_connect(DB_PATH)
         try:
             exists = conn.execute("""
                 SELECT table_name FROM information_schema.tables WHERE table_name = ?
@@ -230,7 +243,7 @@ def vacuum_database():
         return
     before = DB_PATH.stat().st_size
     try:
-        conn = duckdb.connect(str(DB_PATH))
+        conn = _duckdb_connect(DB_PATH)
         try:
             conn.execute("VACUUM")
         finally:
@@ -338,7 +351,7 @@ def emergency_trim_database(dry_run: bool = False):
         return
 
     def delete_oldest_batch(table: str, timestamp_column: str) -> int:
-        conn = duckdb.connect(str(DB_PATH))
+        conn = _duckdb_connect(DB_PATH)
         try:
             exists = conn.execute("""
                 SELECT table_name FROM information_schema.tables WHERE table_name = ?
