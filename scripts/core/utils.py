@@ -1,7 +1,22 @@
 """共享工具函数"""
 
 import fcntl
+import time
 from pathlib import Path
+
+import duckdb
+
+
+def duckdb_connect(path, retries=3):
+    """带重试的 DuckDB 连接，绕过 macOS 文件锁冲突。"""
+    for attempt in range(retries):
+        try:
+            return duckdb.connect(str(path))
+        except duckdb.IOException as e:
+            if attempt < retries - 1 and "lock" in str(e).lower():
+                time.sleep(0.1 * (attempt + 1))
+                continue
+            raise
 
 
 def locked_pid(lock_path: Path, pid_path: Path) -> str:

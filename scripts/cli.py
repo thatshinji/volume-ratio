@@ -14,17 +14,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 
-def _duckdb_connect(path, retries=3):
-    """带重试的 DuckDB 连接，绕过 macOS 文件锁冲突。"""
-    for attempt in range(retries):
-        try:
-            return duckdb.connect(str(path))
-        except duckdb.IOException as e:
-            if attempt < retries - 1 and "lock" in str(e).lower():
-                time.sleep(0.1 * (attempt + 1))
-                continue
-            raise
-
 ROOT = Path(__file__).parent.parent
 GIB = 1024 * 1024 * 1024
 SNAPSHOT_MAX_BYTES = 3 * GIB
@@ -36,7 +25,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from core.config import load_config, parse_ticker, save_config
 from core.market import get_ticker_name
 from core.display import format_ratio_display, format_ticker_line, format_size
-from core.utils import locked_pid
+from core.utils import locked_pid, duckdb_connect
 
 
 # === LLM Prompt 模板 ===
@@ -192,7 +181,7 @@ def cmd_status():
     db_path = ROOT / "data" / "ratios.duckdb"
     if db_path.exists():
         try:
-            conn = _duckdb_connect(db_path)
+            conn = duckdb_connect(db_path)
             try:
                 count = conn.execute("SELECT COUNT(*) FROM volume_ratios").fetchone()[0]
                 size = db_path.stat().st_size
@@ -256,7 +245,7 @@ def cmd_history(ticker: str):
     cutoff = (datetime.now() - timedelta(days=7)).isoformat()
 
     try:
-        conn = _duckdb_connect(db_path)
+        conn = duckdb_connect(db_path)
         try:
             rows = conn.execute("""
                 SELECT timestamp, historical_ratio, price, change_pct, historical_signal,
@@ -299,7 +288,7 @@ def cmd_signals():
     today = datetime.now().strftime("%Y-%m-%d")
 
     try:
-        conn = _duckdb_connect(db_path)
+        conn = duckdb_connect(db_path)
         try:
             rows = conn.execute("""
                 SELECT ticker, name, signal_type, ratio, price, change_pct, source, timestamp

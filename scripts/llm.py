@@ -18,21 +18,11 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 
 
-def _duckdb_connect(path, retries=3):
-    """带重试的 DuckDB 连接，绕过 macOS 文件锁冲突。"""
-    for attempt in range(retries):
-        try:
-            return duckdb.connect(str(path))
-        except duckdb.IOException as e:
-            if attempt < retries - 1 and "lock" in str(e).lower():
-                time.sleep(0.1 * (attempt + 1))
-                continue
-            raise
-
 # 将 scripts/ 加入 sys.path
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from core.config import load_config, save_config
+from core.utils import duckdb_connect
 
 
 def mask_key(key: str) -> str:
@@ -109,7 +99,7 @@ def log_llm_call(model: str, success: bool = True):
     if not db_path.exists():
         return
     try:
-        conn = _duckdb_connect(db_path)
+        conn = duckdb_connect(db_path)
         try:
             conn.execute(
                 "INSERT INTO llm_calls (timestamp, model, success) VALUES (?, ?, ?)",

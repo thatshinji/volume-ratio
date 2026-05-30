@@ -15,19 +15,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from core.config import load_config
 from core.market import get_all_tickers, get_market
+from core.utils import duckdb_connect
 from compute import get_db_path, init_db, save_quote_minute_bar
-
-
-def _duckdb_connect(path, retries=3):
-    """带重试的 DuckDB 连接，绕过 macOS 文件锁冲突。"""
-    for attempt in range(retries):
-        try:
-            return duckdb.connect(str(path))
-        except duckdb.IOException as e:
-            if attempt < retries - 1 and "lock" in str(e).lower():
-                time.sleep(0.1 * (attempt + 1))
-                continue
-            raise
 
 
 def snapshot_files(ticker: str) -> list[Path]:
@@ -72,7 +61,7 @@ def main():
     tickers = args.tickers or get_all_tickers(config)
     init_db()
 
-    conn = _duckdb_connect(get_db_path())
+    conn = duckdb_connect(get_db_path())
     try:
         if args.reset:
             for ticker in tickers:

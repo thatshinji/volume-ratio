@@ -119,9 +119,9 @@ def clear_market_caches():
 @pytest.fixture(autouse=True)
 def clear_config_cache():
     """每个测试前清理 config.py 的缓存。"""
-    from core.config import _config_cache, _config_mtime
-    _config_cache = None
-    _config_mtime = 0
+    import core.config
+    core.config._config_cache = None
+    core.config._config_mtime = 0
     yield
-    _config_cache = None
-    _config_mtime = 0
+    core.config._config_cache = None
+    core.config._config_mtime = 0

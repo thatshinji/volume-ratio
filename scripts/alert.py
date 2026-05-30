@@ -15,17 +15,6 @@ from pathlib import Path
 from typing import List, Optional
 
 
-def _duckdb_connect(path, retries=3):
-    """带重试的 DuckDB 连接，绕过 macOS 文件锁冲突。"""
-    for attempt in range(retries):
-        try:
-            return duckdb.connect(str(path))
-        except duckdb.IOException as e:
-            if attempt < retries - 1 and "lock" in str(e).lower():
-                time.sleep(0.1 * (attempt + 1))
-                continue
-            raise
-
 ROOT = Path(__file__).parent.parent
 
 # 将 scripts/ 加入 sys.path，供 from compute import 等使用
@@ -33,6 +22,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from core.config import load_config, MARKET_END_OF_DAY
 from core.display import format_ratio_display, get_currency_symbol
+from core.utils import duckdb_connect
 
 
 # === 信号规则 ===
@@ -430,7 +420,7 @@ def get_signal_state(ticker: str) -> Optional[str]:
     if not DB_PATH.exists():
         return None
     try:
-        conn = _duckdb_connect(DB_PATH)
+        conn = duckdb_connect(DB_PATH)
         try:
             # 确保表存在
             conn.execute("""
@@ -455,7 +445,7 @@ def update_signal_state(ticker: str, state: str):
     if not DB_PATH.exists():
         return
     try:
-        conn = _duckdb_connect(DB_PATH)
+        conn = duckdb_connect(DB_PATH)
         try:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS signal_states (
@@ -471,8 +461,8 @@ def update_signal_state(ticker: str, state: str):
             """, (ticker, state, datetime.now().isoformat()))
         finally:
             conn.close()
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[alert] update_signal_state 失败 {ticker}: {e}", flush=True)
 
 
 def should_push(ticker: str, new_state: str) -> bool:
@@ -731,7 +721,7 @@ def _fetch_trend_data(tickers: list) -> dict:
     ticker_set = set(tickers)
     result = {}
     try:
-        conn = _duckdb_connect(DB_PATH)
+        conn = duckdb_connect(DB_PATH)
         try:
             rows = conn.execute("""
                 SELECT ticker, historical_ratio, intraday_ratio

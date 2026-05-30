@@ -140,7 +140,7 @@ volume-ratio/
 │   │   ├── config.py        #   配置加载（热加载 + 原子写入 + 市场时间配置）
 │   │   ├── market.py        #   市场判断 + 标的管理（带 TTL 缓存）
 │   │   ├── display.py       #   量比符号 + 格式化显示
-│   │   ├── utils.py         #   共享工具函数（locked_pid）
+│   │   ├── utils.py         #   共享工具函数（locked_pid, duckdb_connect）
 │   │   └── silence.py       #   Longbridge SDK 输出静音（安全恢复 fd）
 │   ├── collect_ws.py        # WebSocket 实时行情采集
 │   ├── collect_ws_launcher.py  # WebSocket 守护进程（cron）
@@ -603,6 +603,7 @@ dependencies = [
     "requests>=2.31.0,<3.0",
     "longbridge>=2.0.0,<3.0",
     "lark-oapi>=1.0.0,<2.0",
+    "duckdb>=0.10.0,<2.0",
 ]
 ```
 
@@ -628,6 +629,7 @@ dependencies = [
 | v3.11 | 2026-05-22 | 修复 `_resolve_session_time` fallback 逻辑：移除 is_trading_day_on 检查，改为 records 为空时直接 fallback 到最新可用日期。另修复 lark-oapi 1.5.5→1.6.5 升级导致的 import 路径变化 |
 | v3.12 | 2026-05-22 | WebSocket 采集进程增加 24 小时自动退出重启机制，防止长时间运行导致文件描述符泄漏累积（Errno 24: Too many open files）；launcher 在进程退出后自动拉起新实例 |
 | v3.13 | 2026-05-22 | 修复 FD 泄漏：compute.py 新增 _get_persistent_conn() 持久连接，save_quote_snapshot 和 save_ratio 改用持久连接替代逐条新建连接，并在写入后 commit() 避免 database is locked；连接数从 74+ 稳定降至 2 个 |
+| v3.14 | 2026-05-30 | 代码审查修复 7 项：`_duckdb_connect` 提取到 `core/utils.py` 统一复用（消除 7 处重复定义）、`duckdb` 补充到 `pyproject.toml` 依赖、`feishu_bot.py` 对 `longbridge_sync` 4 处导入加 try/except 降级处理、`conftest.py` 缓存重置改用模块属性赋值修复测试间状态泄漏、`compute.py` 非交易时段回退取最新记录 `records[-1]`、`update_signal_state` 异常加日志、删除 `llm.py` 死代码 |
 
 ---
 

@@ -21,18 +21,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 DB_PATH = ROOT / "data" / "ratios.duckdb"
 
 
-def _duckdb_connect(path, retries=3):
-    """带重试的 DuckDB 连接，绕过 macOS 文件锁冲突。"""
-    for attempt in range(retries):
-        try:
-            return duckdb.connect(str(path))
-        except duckdb.IOException as e:
-            if attempt < retries - 1 and "lock" in str(e).lower():
-                time.sleep(0.1 * (attempt + 1))
-                continue
-            raise
-
 from core.market import get_market, is_trading_day_on
+from core.utils import duckdb_connect
 
 
 def get_nth_trading_day(market: str, from_date: date, n: int) -> date:
@@ -49,7 +39,7 @@ def get_nth_trading_day(market: str, from_date: date, n: int) -> date:
 def get_close_price(ticker: str, market_date: str) -> float:
     """从 quote_minute_bars 获取指定交易日的收盘价（最后一根分钟 bar 的 close）。"""
     try:
-        conn = _duckdb_connect(DB_PATH)
+        conn = duckdb_connect(DB_PATH)
         try:
             row = conn.execute("""
                 SELECT close FROM quote_minute_bars
@@ -150,7 +140,7 @@ def backfill_signal_results(dry_run: bool = False):
             continue
 
         try:
-            conn = _duckdb_connect(DB_PATH)
+            conn = duckdb_connect(DB_PATH)
             try:
                 conn.execute("""
                     UPDATE signals SET

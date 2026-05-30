@@ -20,16 +20,6 @@ import fcntl
 from datetime import datetime
 
 
-def _duckdb_connect(path, retries=3):
-    """带重试的 DuckDB 连接，绕过 macOS 文件锁冲突。"""
-    for attempt in range(retries):
-        try:
-            return duckdb.connect(str(path))
-        except duckdb.IOException as e:
-            if attempt < retries - 1 and "lock" in str(e).lower():
-                time.sleep(0.1 * (attempt + 1))
-                continue
-            raise
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
@@ -48,7 +38,7 @@ from lark_oapi.core.const import UTF_8
 from core.config import load_config, parse_ticker, remove_ticker_from_config, save_config
 from core.market import get_market
 from core.display import format_ratio_display, build_market_table, build_brief_elements, format_size
-from core.utils import locked_pid
+from core.utils import locked_pid, duckdb_connect
 
 # 全局变量
 running = threading.Event()
@@ -207,7 +197,7 @@ def build_status_card() -> dict:
 
     if db_path.exists():
         try:
-            conn = _duckdb_connect(db_path)
+            conn = duckdb_connect(db_path)
             try:
                 row = conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
                 schema_version = row[0] if row else "legacy"
@@ -506,7 +496,14 @@ def build_signals_card() -> dict:
 
 def build_sync_card() -> dict:
     """构建同步结果卡片"""
-    from longbridge_sync import run_sync
+    try:
+        from longbridge_sync import run_sync
+    except ImportError:
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {"title": {"tag": "plain_text", "content": "❌ 同步失败"}},
+            "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "longbridge_sync 模块不可用"}}],
+        }
 
     try:
         result = run_sync()
@@ -655,7 +652,14 @@ def build_watchlist_card() -> dict:
 
 def build_allstock_card() -> dict:
     """构建全部股票分组列表卡片（一级导航）"""
-    from longbridge_sync import fetch_other_groups
+    try:
+        from longbridge_sync import fetch_other_groups
+    except ImportError:
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {"title": {"tag": "plain_text", "content": "📈 全部股票"}},
+            "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "longbridge_sync 模块不可用"}}],
+        }
 
     try:
         groups = fetch_other_groups(exclude_names=["量比监控"])
@@ -699,7 +703,14 @@ def build_allstock_card() -> dict:
 
 def build_group_stocks_card(group_name: str) -> dict:
     """构建指定分组的股票列表卡片（二级导航，带添加+返回按钮）"""
-    from longbridge_sync import _get_longbridge_context
+    try:
+        from longbridge_sync import _get_longbridge_context
+    except ImportError:
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {"title": {"tag": "plain_text", "content": f"📁 {group_name}"}},
+            "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "longbridge_sync 模块不可用"}}],
+        }
 
     try:
         quote_ctx, _ = _get_longbridge_context()
@@ -764,7 +775,11 @@ def build_group_stocks_card(group_name: str) -> dict:
 
 def handle_card_action(data) -> "P2CardActionTriggerResponse":
     """处理卡片按钮点击回调"""
-    from longbridge_sync import remove_from_watchlist, add_to_monitor
+    try:
+        from longbridge_sync import remove_from_watchlist, add_to_monitor
+    except ImportError:
+        remove_from_watchlist = None
+        add_to_monitor = None
     from lark_oapi.event.callback.model.p2_card_action_trigger import (
         P2CardActionTriggerResponse, CallBackToast, CallBackCard,
     )
@@ -791,6 +806,8 @@ def handle_card_action(data) -> "P2CardActionTriggerResponse":
 
         # 从长桥自选股移除
         try:
+            if remove_from_watchlist is None:
+                raise ImportError("longbridge_sync 模块不可用")
             remove_from_watchlist(ticker)
         except Exception as e:
             print(f"[bot] 长桥删除失败: {e}", flush=True)
@@ -814,6 +831,8 @@ def handle_card_action(data) -> "P2CardActionTriggerResponse":
         # 添加到长桥"量比监控"分组
         success = False
         try:
+            if add_to_monitor is None:
+                raise ImportError("longbridge_sync 模块不可用")
             success = add_to_monitor(ticker, name)
         except Exception as e:
             print(f"[bot] 长桥添加失败: {e}", flush=True)
@@ -917,7 +936,7 @@ def _check_component_status() -> dict:
     db_path = ROOT / "data" / "ratios.duckdb"
     if db_path.exists():
         try:
-            conn = _duckdb_connect(db_path)
+            conn = duckdb_connect(db_path)
             try:
                 count = conn.execute("SELECT COUNT(*) FROM volume_ratios").fetchone()[0]
                 status["db"] = ("✅", f"{count:,} 条记录")
